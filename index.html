@@ -51,7 +51,7 @@ function hoursFor(w){return w==="10m"?.17:w==="1h"?1:w==="6h"?6:w==="12h"?12:24;
 // ── Data fetchers ──
 async function fetchActivityData(hours){
   const now=new Date(),start=new Date(now.getTime()-hours*3600000),articles={};
-  let cont=null,pg=0;const mx=hours<=1?3:hours<=6?5:8;
+  let cont=null,pg=0;const mx=10;
   do{const p={action:"query",list:"recentchanges",rcnamespace:"0",rclimit:"500",rctype:"edit",
     rcstart:now.toISOString(),rcend:start.toISOString(),rcdir:"older",rcprop:"title|tags|comment|sizes"};
     if(cont)p.rccontinue=cont;const d=await mwFetch(p);
@@ -258,7 +258,7 @@ function App(){
   const uniqueArtsRef=useRef(new Set());const uniqueEditorsRef=useRef(new Set());
   const churnByArticleRef=useRef({});
 
-  const timeOpts=[{value:"10m",label:"10M"},{value:"1h",label:"1H"},{value:"6h",label:"6H"},{value:"24h",label:"24H"}];
+  const timeOpts=[{value:"10m",label:"10M"},{value:"1h",label:"1H"},{value:"6h",label:"6H"}];
   const viewOpts=[{value:"yesterday",label:"YDAY"},{value:"week",label:"WEEK"},{value:"month",label:"MONTH"},{value:"year",label:"YEAR"}];
   const p2TimeOpts=[{value:"1h",label:"1H"},{value:"6h",label:"6H"},{value:"12h",label:"12H"},{value:"24h",label:"24H"}];
 
