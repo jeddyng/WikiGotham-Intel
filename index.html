@@ -305,6 +305,7 @@ function App(){
     const toArray=()=>Object.entries(articles).map(([title,d])=>({title,edits:d.edits,reverts:d.reverts,
       bytesKB:Math.round(d.bytesChanged/1024),totalBytes:d.bytesChanged,netBytes:d.netBytes}));
 
+    let retries=0;
     const fetchNext=async()=>{
       if(ctrl.abort)return;
       const p={action:"query",list:"recentchanges",rcnamespace:"0",rclimit:"500",rctype:"edit",
@@ -312,6 +313,7 @@ function App(){
       if(cont)p.rccontinue=cont;
       try{
         const d=await mwFetch(p);
+        retries=0; // reset on success
         processPage(d.query?.recentchanges);
         cont=d.continue?.rccontinue||null;pg++;
         const arr=toArray();
@@ -325,7 +327,17 @@ function App(){
           setEditsProgress(null);
           activityCacheRef.current[editWindow]={data:arr,timestamp:Date.now(),complete:true};
         }
-      }catch(e){setEditsProgress(null);}
+      }catch(e){
+        retries++;
+        if(retries<3&&!ctrl.abort){
+          console.warn("API error, retrying in 5s...",e);
+          setTimeout(fetchNext,5000);
+        }else{
+          setEditsProgress(null);
+          const arr=toArray();
+          if(arr.length)activityCacheRef.current[editWindow]={data:arr,timestamp:Date.now(),complete:true};
+        }
+      }
     };
     fetchNext();
   },[editWindow]);
