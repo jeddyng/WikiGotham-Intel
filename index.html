@@ -257,9 +257,10 @@ function App(){
   const startRef=useRef(Date.now());const containerRef=useRef(null);
   const uniqueArtsRef=useRef(new Set());const uniqueEditorsRef=useRef(new Set());
   const churnByArticleRef=useRef({});
-  const [editsProgress,setEditsProgress]=useState(null); // {loaded:N, pages:N} or null
+  const [editsProgress,setEditsProgress]=useState(null);
   const progressAbortRef=useRef(null);
-  const activityCacheRef=useRef({}); // {window: {data:[], timestamp:Date.now(), complete:bool}}
+  const activityCacheRef=useRef({}); // {window: {data:[], timestamp, complete}}
+  const progressStateRef=useRef({}); // {window: {articles, cont, pg, now, start, maxPages, delay}}
 
   const timeOpts=[{value:"10m",label:"10M"},{value:"1h",label:"1H"},{value:"6h",label:"6H"},{value:"24h",label:"24H"}];
   const viewOpts=[{value:"yesterday",label:"YDAY"},{value:"week",label:"WEEK"},{value:"month",label:"MONTH"},{value:"year",label:"YEAR"}];
@@ -267,26 +268,43 @@ function App(){
 
   // ── Loaders ──
   const loadActivity=useCallback(()=>{
-    // Abort any in-progress progressive load
+    // Pause any in-progress load
     if(progressAbortRef.current)progressAbortRef.current.abort=true;
 
-    // Check cache — use if less than 5 minutes old
+    // Check completed cache first
     const cached=activityCacheRef.current[editWindow];
-    if(cached&&(Date.now()-cached.timestamp)<600000){
-      setActivityData(cached.data);setEditsLoading(false);
-      setEditsProgress(cached.complete?null:{loaded:cached.data.length*10,pages:0});
+    if(cached&&cached.complete&&(Date.now()-cached.timestamp)<600000){
+      setActivityData(cached.data);setEditsLoading(false);setEditsProgress(null);
       return;
     }
 
-    // Max pages per window — enough to cover most edits in that period
-    const maxPages=editWindow==="10m"?6:editWindow==="1h"?30:editWindow==="6h"?40:40;
-    const delay=editWindow==="10m"?500:1500; // faster for short windows
+    const delay=editWindow==="10m"?500:1500;
 
-    setEditsLoading(true);setEditsProgress({loaded:0,pages:0});
+    // Check for saved progressive state to resume
+    const saved=progressStateRef.current[editWindow];
+    let articles,cont,pg,now,start;
+
+    if(saved&&(Date.now()-saved.startedAt)<600000){
+      articles=saved.articles;cont=saved.cont;pg=saved.pg;now=saved.now;start=saved.start;
+      const toArr=()=>Object.entries(articles).map(([title,d])=>({title,edits:d.edits,reverts:d.reverts,
+        bytesKB:Math.round(d.bytesChanged/1024),totalBytes:d.bytesChanged,netBytes:d.netBytes}));
+      setActivityData(toArr());
+      setEditsLoading(false);
+      setEditsProgress({loaded:pg*500,pages:pg});
+      if(!cont){
+        // Already finished last time
+        setEditsProgress(null);
+        activityCacheRef.current[editWindow]={data:toArr(),timestamp:Date.now(),complete:true};
+        return;
+      }
+    }else{
+      articles={};cont=null;pg=0;
+      now=new Date();start=new Date(now.getTime()-hoursFor(editWindow)*3600000);
+      setEditsLoading(true);setEditsProgress({loaded:0,pages:0});
+    }
+
     const ctrl={abort:false};progressAbortRef.current=ctrl;
-    const hours=hoursFor(editWindow);
-    const now=new Date(),start=new Date(now.getTime()-hours*3600000);
-    const articles={};let cont=null;let pg=0;
+    const windowKey=editWindow;
 
     const processPage=(rcs)=>{
       (rcs||[]).forEach(rc=>{
@@ -307,39 +325,50 @@ function App(){
 
     let retries=0;
     const fetchNext=async()=>{
-      if(ctrl.abort)return;
+      if(ctrl.abort){
+        progressStateRef.current[windowKey]={articles,cont,pg,now,start,startedAt:progressStateRef.current[windowKey]?.startedAt||Date.now()};
+        return;
+      }
       const p={action:"query",list:"recentchanges",rcnamespace:"0",rclimit:"500",rctype:"edit",
         rcstart:now.toISOString(),rcend:start.toISOString(),rcdir:"older",rcprop:"title|tags|comment|sizes"};
       if(cont)p.rccontinue=cont;
       try{
         const d=await mwFetch(p);
-        retries=0; // reset on success
+        retries=0;
         processPage(d.query?.recentchanges);
         cont=d.continue?.rccontinue||null;pg++;
         const arr=toArray();
         setEditsProgress({loaded:pg*500,pages:pg});
         setActivityData(arr);
-        activityCacheRef.current[editWindow]={data:arr,timestamp:Date.now(),complete:false};
+        progressStateRef.current[windowKey]={articles,cont,pg,now,start,startedAt:progressStateRef.current[windowKey]?.startedAt||Date.now()};
         if(pg===1)setEditsLoading(false);
-        if(cont&&pg<maxPages&&!ctrl.abort){
+        if(cont&&!ctrl.abort){
           setTimeout(fetchNext,delay);
         }else{
+          // Done — no more data or aborted
           setEditsProgress(null);
-          activityCacheRef.current[editWindow]={data:arr,timestamp:Date.now(),complete:true};
+          activityCacheRef.current[windowKey]={data:arr,timestamp:Date.now(),complete:true};
+          delete progressStateRef.current[windowKey];
         }
       }catch(e){
         retries++;
-        if(retries<3&&!ctrl.abort){
-          console.warn("API error, retrying in 5s...",e);
-          setTimeout(fetchNext,5000);
+        if(retries<5&&!ctrl.abort){
+          console.warn(`API error (retry ${retries}/5), waiting ${retries*3}s...`,e);
+          setTimeout(fetchNext,retries*3000); // back off: 3s, 6s, 9s, 12s, 15s
         }else{
+          // Save state so we can resume later
+          progressStateRef.current[windowKey]={articles,cont,pg,now,start,startedAt:progressStateRef.current[windowKey]?.startedAt||Date.now()};
           setEditsProgress(null);
-          const arr=toArray();
-          if(arr.length)activityCacheRef.current[editWindow]={data:arr,timestamp:Date.now(),complete:true};
         }
       }
     };
-    fetchNext();
+
+    if(saved&&(Date.now()-saved.startedAt)<600000){
+      setTimeout(fetchNext,delay);
+    }else{
+      progressStateRef.current[windowKey]={articles,cont,pg,now,start,startedAt:Date.now()};
+      fetchNext();
+    }
   },[editWindow]);
 
   const loadP2=useCallback(()=>{
@@ -594,11 +623,11 @@ table{border-collapse:collapse;width:100%;margin-bottom:8px}td{padding:3px 0;ver
             </div>
           </div>
           {editsProgress?
-            <div title={`Progressive loading: fetching one batch every 2 seconds. Rankings update live as more data loads.`} style={{display:"flex",alignItems:"center",gap:6,padding:"2px 8px",background:C.bg,cursor:"help",flexShrink:0}}>
+            <div title="Loading edits from Wikipedia API. Rankings update live. Switch away anytime — progress is saved." style={{display:"flex",alignItems:"center",gap:6,padding:"2px 8px",background:C.bg,cursor:"help",flexShrink:0}}>
               <span style={{display:"inline-block",width:8,height:8,border:`1.5px solid ${C.accent}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin .8s linear infinite",flexShrink:0}}/>
-              <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:8,color:C.accent}}>~{formatNum(editsProgress.loaded)} edits loaded</span>
+              <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:8,color:C.accent}}>~{formatNum(editsProgress.loaded)} edits</span>
               <div style={{flex:1,height:2,background:C.card,borderRadius:1,overflow:"hidden"}}>
-                <div style={{height:"100%",width:Math.min((editsProgress.pages/40)*100,100)+"%",background:C.accent,transition:"width .5s",borderRadius:1}}/>
+                <div style={{height:"100%",width:"100%",background:`linear-gradient(90deg,${C.accent}44,${C.accent},${C.accent}44)`,backgroundSize:"200% 100%",animation:"pulse 1.5s ease infinite",borderRadius:1}}/>
               </div>
             </div>
           :<CountdownBar remaining={editCountdown} total={REFRESH} color={editMode==="edits"?C.amber:editMode==="kb"?C.green:C.red}/>}
