@@ -257,15 +257,67 @@ function App(){
   const startRef=useRef(Date.now());const containerRef=useRef(null);
   const uniqueArtsRef=useRef(new Set());const uniqueEditorsRef=useRef(new Set());
   const churnByArticleRef=useRef({});
+  const [editsProgress,setEditsProgress]=useState(null); // {loaded:N, pages:N} or null
+  const progressAbortRef=useRef(null);
 
-  const timeOpts=[{value:"10m",label:"10M"},{value:"1h",label:"1H"},{value:"6h",label:"6H"}];
+  const timeOpts=[{value:"10m",label:"10M"},{value:"1h",label:"1H"},{value:"6h",label:"6H"},{value:"24h",label:"24H"}];
   const viewOpts=[{value:"yesterday",label:"YDAY"},{value:"week",label:"WEEK"},{value:"month",label:"MONTH"},{value:"year",label:"YEAR"}];
   const p2TimeOpts=[{value:"1h",label:"1H"},{value:"6h",label:"6H"},{value:"12h",label:"12H"},{value:"24h",label:"24H"}];
 
   // ── Loaders ──
   const loadActivity=useCallback(()=>{
-    setEditsLoading(true);
-    fetchActivityData(hoursFor(editWindow)).then(d=>{setActivityData(d);setEditsLoading(false);});
+    // Abort any in-progress progressive load
+    if(progressAbortRef.current)progressAbortRef.current.abort=true;
+
+    if(editWindow==="24h"){
+      // Progressive load for 24H — one page every 2 seconds
+      setEditsLoading(true);setEditsProgress({loaded:0,pages:0});
+      const ctrl={abort:false};progressAbortRef.current=ctrl;
+      const now=new Date(),start=new Date(now.getTime()-24*3600000);
+      const articles={};let cont=null;let pg=0;const maxPages=40;
+
+      const processPage=(rcs)=>{
+        (rcs||[]).forEach(rc=>{
+          if(!filterA(rc.title))return;
+          if(!articles[rc.title])articles[rc.title]={edits:0,reverts:0,bytesChanged:0,netBytes:0};
+          articles[rc.title].edits++;
+          const diff=(rc.newlen||0)-(rc.oldlen||0);
+          articles[rc.title].bytesChanged+=Math.abs(diff);
+          articles[rc.title].netBytes+=diff;
+          const tags=(rc.tags||[]).join(" ").toLowerCase();const comment=(rc.comment||"").toLowerCase();
+          if(tags.includes("revert")||tags.includes("rollback")||tags.includes("undo")||comment.includes("revert")||comment.includes("undid")||comment.includes("rv ")||comment.includes("rollback"))
+            articles[rc.title].reverts++;
+        });
+      };
+
+      const toArray=()=>Object.entries(articles).map(([title,d])=>({title,edits:d.edits,reverts:d.reverts,
+        bytesKB:Math.round(d.bytesChanged/1024),totalBytes:d.bytesChanged,netBytes:d.netBytes}));
+
+      const fetchNext=async()=>{
+        if(ctrl.abort)return;
+        const p={action:"query",list:"recentchanges",rcnamespace:"0",rclimit:"500",rctype:"edit",
+          rcstart:now.toISOString(),rcend:start.toISOString(),rcdir:"older",rcprop:"title|tags|comment|sizes"};
+        if(cont)p.rccontinue=cont;
+        try{
+          const d=await mwFetch(p);
+          processPage(d.query?.recentchanges);
+          cont=d.continue?.rccontinue||null;pg++;
+          setEditsProgress({loaded:pg*500,pages:pg});
+          setActivityData(toArray());
+          if(pg===1)setEditsLoading(false); // show partial results after first page
+          if(cont&&pg<maxPages&&!ctrl.abort){
+            setTimeout(fetchNext,2000);
+          }else{
+            setEditsProgress(null);
+          }
+        }catch(e){setEditsProgress(null);}
+      };
+      fetchNext();
+    }else{
+      // Normal fast load for 10M/1H/6H
+      setEditsLoading(true);setEditsProgress(null);
+      fetchActivityData(hoursFor(editWindow)).then(d=>{setActivityData(d);setEditsLoading(false);});
+    }
   },[editWindow]);
 
   const loadP2=useCallback(()=>{
@@ -519,7 +571,15 @@ table{border-collapse:collapse;width:100%;margin-bottom:8px}td{padding:3px 0;ver
               <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:8,color:C.textDim,marginLeft:"auto"}}>{sortedActivity.length}</span>
             </div>
           </div>
-          <CountdownBar remaining={editCountdown} total={REFRESH} color={editMode==="edits"?C.amber:editMode==="kb"?C.green:C.red}/>
+          {editsProgress?
+            <div title={`Progressive loading: fetching one batch every 2 seconds. Rankings update live as more data loads.`} style={{display:"flex",alignItems:"center",gap:6,padding:"2px 8px",background:C.bg,cursor:"help",flexShrink:0}}>
+              <span style={{display:"inline-block",width:8,height:8,border:`1.5px solid ${C.accent}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin .8s linear infinite",flexShrink:0}}/>
+              <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:8,color:C.accent}}>~{formatNum(editsProgress.loaded)} edits loaded</span>
+              <div style={{flex:1,height:2,background:C.card,borderRadius:1,overflow:"hidden"}}>
+                <div style={{height:"100%",width:Math.min((editsProgress.pages/40)*100,100)+"%",background:C.accent,transition:"width .5s",borderRadius:1}}/>
+              </div>
+            </div>
+          :<CountdownBar remaining={editCountdown} total={REFRESH} color={editMode==="edits"?C.amber:editMode==="kb"?C.green:C.red}/>}
           <div style={{flex:1,overflow:"auto"}}>{editsLoading?<SkeletonList/>:sortedActivity.length===0?
             <div style={{padding:30,textAlign:"center",color:C.textDim,fontFamily:"'IBM Plex Mono',monospace",fontSize:10}}>No data</div>
             :sortedActivity.map((item,i)=>{
