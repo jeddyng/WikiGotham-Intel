@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>WIKIGOTHAM — Intelligence Feed</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='4' fill='%2305060a'/><text x='16' y='22' text-anchor='middle' font-size='18' fill='%2300c8ff'>◈</text></svg>"/>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+html,body{width:100%;height:100%;overflow:hidden;background:#05060a;}
+#root{overflow-y:auto;overflow-x:hidden;height:100%;background:#05060a;}
+::-webkit-scrollbar{width:4px;height:4px;}
+::-webkit-scrollbar-track{background:#05060a;}
+::-webkit-scrollbar-thumb{background:#1a1e2c;border-radius:4px;}
+@keyframes fadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+@keyframes pulse{0%,100%{opacity:.2}50%{opacity:.45}}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.4}}
+@keyframes spin{to{transform:rotate(360deg)}}
+.skel{background:linear-gradient(90deg,#10131b,#1a1e2c,#10131b);background-size:200% 100%;animation:pulse 1.4s infinite;border-radius:4px;}
+.row:hover{background:#151a24 !important;}
+.tl{font-family:'Rajdhani',sans-serif;font-weight:600;font-size:12px;color:#e2e6ee;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;}
+.tl:hover{color:#00c8ff !important;}
+.divider{width:5px;cursor:col-resize;background:transparent;flex-shrink:0;position:relative;z-index:10;}
+.divider:hover,.divider.active{background:rgba(0,200,255,0.15);}
+.divider::after{content:'';position:absolute;top:0;bottom:0;left:2px;width:1px;background:#181d2a;}
+.divider:hover::after,.divider.active::after{background:#00c8ff;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useCallback,useRef,useMemo}=React;
+const API_MW="https://en.wikipedia.org/w/api.php";
+const STREAM_URL="https://stream.wikimedia.org/v2/stream/recentchange";
+const REFRESH=60;
+const C={bg:"#05060a",panel:"#0a0c12",card:"#0f1219",cardHover:"#151a24",border:"#181d2a",accent:"#00c8ff",accentDim:"rgba(0,200,255,0.08)",amber:"#ffa800",amberDim:"rgba(255,168,0,0.1)",red:"#ff3858",redDim:"rgba(255,56,88,0.08)",green:"#00e68a",greenDim:"rgba(0,230,138,0.08)",text:"#b0b6c4",textDim:"#4e5568",textBright:"#e2e6ee"};
+
+async function mwFetch(p){const u=new URL(API_MW);Object.entries({...p,format:"json",origin:"*"}).forEach(([k,v])=>u.searchParams.set(k,v));return(await fetch(u)).json();}
+function formatNum(n){if(!n)return"—";if(n>=1e6)return(n/1e6).toFixed(1)+"M";if(n>=1e3)return(n/1e3).toFixed(1)+"K";return""+n;}
+function timeAgo(ts){const s=Math.floor((Date.now()-ts)/1000);if(s<5)return"just now";if(s<60)return s+"s ago";if(s<3600)return Math.floor(s/60)+"m ago";return Math.floor(s/3600)+"h ago";}
+function pad2(n){return String(n).padStart(2,"0");}
+const filterA=a=>!/^(Special:|Main_Page|Wikipedia:|Portal:|Help:|Template:|User:|Talk:|Draft:|Module:)/.test(a)&&!a.includes("(disambiguation)")&&!a.includes("/");
+function wikiUrl(t){return`https://en.wikipedia.org/wiki/${encodeURIComponent(t)}`;}
+function fmtDur(ms){const m=Math.floor(ms/60000),h=Math.floor(m/60);if(h>0)return`${h}h ${m%60}m`;return`${m}m`;}
+function hoursFor(w){return w==="10m"?.17:w==="1h"?1:w==="6h"?6:w==="12h"?12:24;}
+
+// ── Data fetchers ──
+async function fetchActivityData(hours){
+  const now=new Date(),start=new Date(now.getTime()-hours*3600000),articles={};
+  let cont=null,pg=0;const mx=hours<=1?3:hours<=6?5:8;
+  do{const p={action:"query",list:"recentchanges",rcnamespace:"0",rclimit:"500",rctype:"edit",
+    rcstart:now.toISOString(),rcend:start.toISOString(),rcdir:"older",rcprop:"title|tags|comment|sizes"};
+    if(cont)p.rccontinue=cont;const d=await mwFetch(p);
+    (d.query?.recentchanges||[]).forEach(rc=>{
+      if(!filterA(rc.title))return;
+      if(!articles[rc.title])articles[rc.title]={edits:0,reverts:0,bytesChanged:0,netBytes:0};
+      articles[rc.title].edits++;
+      const diff=(rc.newlen||0)-(rc.oldlen||0);
+      articles[rc.title].bytesChanged+=Math.abs(diff);
+      articles[rc.title].netBytes+=diff;
+      const tags=(rc.tags||[]).join(" ").toLowerCase();const comment=(rc.comment||"").toLowerCase();
+      if(tags.includes("revert")||tags.includes("rollback")||tags.includes("undo")||comment.includes("revert")||comment.includes("undid")||comment.includes("rv ")||comment.includes("rollback"))
+        articles[rc.title].reverts++;
+    });cont=d.continue?.rccontinue||null;pg++;
+  }while(cont&&pg<mx);
+  return Object.entries(articles).map(([title,d])=>({title,edits:d.edits,reverts:d.reverts,
+    bytesKB:Math.round(d.bytesChanged/1024),totalBytes:d.bytesChanged,netBytes:d.netBytes}));
+}
+
+async function fetchRecentNewArticles(hours){
+  const now=new Date(),start=new Date(now.getTime()-hours*3600000);
+  let cont=null,pg=0,all=[];
+  do{const p={action:"query",list:"recentchanges",rcnamespace:"0",rclimit:"500",rctype:"new",rcstart:now.toISOString(),rcend:start.toISOString(),rcdir:"older",rcshow:"!bot",rcprop:"title|ids|sizes|user|comment|timestamp"};
+    if(cont)p.rccontinue=cont;const d=await mwFetch(p);all.push(...(d.query?.recentchanges||[]));cont=d.continue?.rccontinue||null;pg++;
+  }while(cont&&pg<3);
+  return all.filter(rc=>filterA(rc.title)).map(rc=>({id:"api_"+rc.revid,title:rc.title,user:rc.user,bot:false,type:"new",comment:rc.comment||"",timestamp:new Date(rc.timestamp).getTime(),length:{new:rc.newlen||0,old:0}}));
+}
+
+async function fetchDeletedArticles(hours){
+  const now=new Date(),start=new Date(now.getTime()-hours*3600000);
+  const d=await mwFetch({action:"query",list:"logevents",letype:"delete",leaction:"delete/delete",lenamespace:"0",lelimit:"100",lestart:now.toISOString(),leend:start.toISOString(),ledir:"older"});
+  return(d.query?.logevents||[]).filter(le=>filterA(le.title)).map(le=>({id:"del_"+le.logid,title:le.title,user:le.user,comment:le.comment||"",timestamp:new Date(le.timestamp).getTime()}));
+}
+
+async function fetchMoves(){
+  const now=new Date(),start=new Date(now.getTime()-24*3600000);
+  const d=await mwFetch({action:"query",list:"logevents",letype:"move",lenamespace:"0",lelimit:"50",lestart:now.toISOString(),leend:start.toISOString(),ledir:"older"});
+  return(d.query?.logevents||[]).map(le=>({id:"move_"+le.logid,from:le.title||"",to:le.params?.target_title||"",user:le.user||"",comment:le.comment||"",timestamp:new Date(le.timestamp).getTime()}));
+}
+
+async function fetchDayTop(date){const y=date.getFullYear(),m=pad2(date.getMonth()+1),d=pad2(date.getDate());
+  try{const r=await fetch(`https://wikimedia.org/api/rest_v1/metrics/pageviews/top/en.wikipedia/all-access/${y}/${m}/${d}`);const data=await r.json();return(data.items?.[0]?.articles||[]).filter(a=>filterA(a.article));}catch(e){return[];}}
+async function fetchViewedYesterday(){const d=new Date();d.setDate(d.getDate()-1);return(await fetchDayTop(d)).slice(0,50).map(a=>({title:a.article.replace(/_/g," "),views:a.views}));}
+async function fetchViewedWeek(){const days=[];for(let i=1;i<=7;i++){const d=new Date();d.setDate(d.getDate()-i);days.push(d);}
+  const r=await Promise.all(days.map(fetchDayTop));const m={};r.flat().forEach(a=>{const t=a.article.replace(/_/g," ");m[t]=(m[t]||0)+a.views;});
+  return Object.entries(m).sort((a,b)=>b[1]-a[1]).slice(0,50).map(([title,views])=>({title,views}));}
+async function fetchViewedMonth(){const now=new Date();let y=now.getFullYear(),mo=now.getMonth();if(mo===0){mo=12;y--;}
+  try{const r=await fetch(`https://wikimedia.org/api/rest_v1/metrics/pageviews/top/en.wikipedia/all-access/${y}/${pad2(mo)}/all-days`);const data=await r.json();
+    return(data.items?.[0]?.articles||[]).filter(a=>filterA(a.article)).slice(0,50).map(a=>({title:a.article.replace(/_/g," "),views:a.views}));}catch(e){return[];}}
+async function fetchViewedYear(){const now=new Date();const fetches=[];
+  for(let i=0;i<3;i++){let y=now.getFullYear(),mo=now.getMonth()-i;if(mo<=0){mo+=12;y--;}
+    fetches.push(fetch(`https://wikimedia.org/api/rest_v1/metrics/pageviews/top/en.wikipedia/all-access/${y}/${pad2(mo)}/all-days`).then(r=>r.json()).then(d=>(d.items?.[0]?.articles||[]).filter(a=>filterA(a.article))).catch(()=>[]));
+  }const results=await Promise.all(fetches);const m={};results.flat().forEach(a=>{const t=a.article.replace(/_/g," ");m[t]=(m[t]||0)+a.views;});
+  return Object.entries(m).sort((a,b)=>b[1]-a[1]).slice(0,50).map(([title,views])=>({title,views}));}
+async function fetchMostViewed(range){if(range==="yesterday")return fetchViewedYesterday();if(range==="week")return fetchViewedWeek();if(range==="month")return fetchViewedMonth();return fetchViewedYear();}
+
+// ── Countdown hook ──
+function useCountdown(seconds,onTick){
+  const [remaining,setRemaining]=useState(seconds);
+  const cbRef=useRef(onTick);
+  cbRef.current=onTick;
+  useEffect(()=>{
+    const iv=setInterval(()=>{
+      setRemaining(prev=>{
+        if(prev<=1){cbRef.current?.();return seconds;}
+        return prev-1;
+      });
+    },1000);
+    return()=>clearInterval(iv);
+  },[seconds]);
+  return remaining;
+}
+
+// ── Components ──
+function CountdownBar({remaining,total,color}){
+  const pct=(remaining/total)*100;
+  return(<div title={`Auto-refreshes data from Wikipedia API every ${total} seconds`} style={{display:"flex",alignItems:"center",gap:6,padding:"2px 8px",background:C.bg,cursor:"help",flexShrink:0}}>
+    <div style={{flex:1,height:2,background:C.card,borderRadius:1,overflow:"hidden"}}>
+      <div style={{height:"100%",width:pct+"%",background:color||C.accent,transition:"width 1s linear",borderRadius:1}}/>
+    </div>
+    <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:8,color:C.textDim,flexShrink:0}}>{remaining}s</span>
+  </div>);
+}
+
+function Divider({onDrag}){
+  const [active,setActive]=useState(false);const startX=useRef(0);
+  const onMouseDown=e=>{e.preventDefault();setActive(true);startX.current=e.clientX;
+    const onMove=ev=>{const dx=ev.clientX-startX.current;startX.current=ev.clientX;onDrag(dx);};
+    const onUp=()=>{setActive(false);document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);};
+    document.addEventListener("mousemove",onMove);document.addEventListener("mouseup",onUp);};
+  return <div className={`divider${active?" active":""}`} onMouseDown={onMouseDown}/>;
+}
+function TimeSelector({options,value,onChange}){
+  return(<div style={{display:"flex",gap:1,background:C.card,borderRadius:3,padding:1,border:`1px solid ${C.border}`}}>
+    {options.map(o=>(<button key={o.value} onClick={()=>onChange(o.value)} style={{fontFamily:"'Rajdhani',sans-serif",fontWeight:600,fontSize:9.5,padding:"2px 6px",borderRadius:2,border:"none",cursor:"pointer",transition:"all .15s",background:value===o.value?C.accent:"transparent",color:value===o.value?C.bg:C.textDim}}>{o.label}</button>))}
+  </div>);
+}
+function ToggleBtn({options,value,onChange}){
+  return(<div style={{display:"flex",gap:1,background:C.card,borderRadius:3,padding:1,border:`1px solid ${C.border}`}}>
+    {options.map(o=>(<button key={o.value} title={o.tip||""} onClick={()=>onChange(o.value)} style={{fontFamily:"'Rajdhani',sans-serif",fontWeight:600,fontSize:9.5,padding:"2px 7px",borderRadius:2,border:"none",cursor:"pointer",transition:"all .15s",background:value===o.value?(o.color||C.accent):"transparent",color:value===o.value?C.bg:C.textDim}}>{o.label}</button>))}
+  </div>);
+}
+
+function FeedItem({edit}){
+  const isNew=edit.type==="new";const sc=edit.length?.new&&edit.length?.old?(edit.length.new-edit.length.old):0;
+  const tip=`${edit.title}\nEditor: ${edit.user}${edit.comment?"\nSummary: "+edit.comment:""}${sc?"\nChange: "+(sc>0?"+":"")+sc+" bytes":""}`;
+  return(<div className="row" title={tip} style={{padding:"5px 12px",borderBottom:`1px solid ${C.border}06`,animation:"fadeIn .25s ease",display:"flex",gap:8,alignItems:"flex-start",fontSize:11.5,cursor:"help"}}>
+    <div style={{width:5,height:5,borderRadius:"50%",marginTop:5,flexShrink:0,background:isNew?C.green:edit.bot?C.amber:C.accent}}/>
+    <div style={{flex:1,minWidth:0}}>
+      <div style={{display:"flex",alignItems:"center",gap:6}}>
+        <a href={wikiUrl(edit.title)} target="_blank" rel="noopener noreferrer" className="tl">{edit.title}</a>
+        {sc!==0&&<span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9,color:sc>0?C.green:C.red,flexShrink:0}}>{sc>0?"+":""}{sc}</span>}
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:6,marginTop:1}}>
+        <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9,color:C.textDim}}>{edit.user}</span>
+        {edit.bot&&<span style={{fontSize:7.5,color:C.amber,background:C.amberDim,padding:"0 3px",borderRadius:2,fontFamily:"'IBM Plex Mono',monospace"}}>BOT</span>}
+        {isNew&&<span style={{fontSize:7.5,color:C.green,background:C.greenDim,padding:"0 3px",borderRadius:2,fontFamily:"'IBM Plex Mono',monospace"}}>NEW</span>}
+        {edit.comment&&<span style={{fontSize:9,color:C.textDim,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,fontStyle:"italic"}}>{edit.comment.slice(0,50)}</span>}
+      </div>
+    </div>
+    <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:8.5,color:C.textDim,flexShrink:0}}>{timeAgo(edit.timestamp)}</span>
+  </div>);
+}
+function NewItem({item}){
+  const tip=`NEW: ${item.title}\nCreated by: ${item.user}${item.comment?"\nSummary: "+item.comment:""}${item.length?.new?"\nSize: "+formatNum(item.length.new)+" bytes":""}`;
+  return(<div className="row" title={tip} style={{padding:"5px 12px",borderBottom:`1px solid ${C.border}06`,animation:"fadeIn .3s ease",cursor:"help"}}>
+    <div style={{display:"flex",alignItems:"center",gap:6}}>
+      <span style={{width:5,height:5,borderRadius:"50%",background:C.green,flexShrink:0}}/>
+      <a href={wikiUrl(item.title)} target="_blank" rel="noopener noreferrer" className="tl">{item.title}</a>
+      <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:8.5,color:C.textDim,flexShrink:0}}>{timeAgo(item.timestamp)}</span>
+    </div>
+    <div style={{display:"flex",alignItems:"center",gap:6,marginTop:2,paddingLeft:11}}>
+      <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9,color:C.textDim}}>{item.user}</span>
+      {item.length?.new>0&&<span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9,color:C.green}}>{formatNum(item.length.new)}b</span>}
+      {item.comment&&<span style={{fontSize:9,color:C.textDim,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,fontStyle:"italic"}}>{item.comment.slice(0,50)}</span>}
+    </div>
+  </div>);
+}
+function MoveItem({item}){
+  const tip=`MOVED: ${item.from.replace(/_/g," ")} → ${item.to.replace(/_/g," ")}\nMoved by: ${item.user}${item.comment?"\nReason: "+item.comment:""}`;
+  return(<div className="row" title={tip} style={{padding:"4px 12px",borderBottom:`1px solid ${C.border}06`,animation:"fadeIn .3s ease",display:"flex",alignItems:"center",gap:6,fontSize:11,cursor:"help"}}>
+    <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:8.5,color:C.textDim,flexShrink:0}}>{timeAgo(item.timestamp)}</span>
+    <span style={{fontFamily:"'Rajdhani',sans-serif",fontWeight:600,color:C.textDim,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flexShrink:1,minWidth:0}}>{item.from.replace(/_/g," ")}</span>
+    <span style={{color:C.amber,flexShrink:0}}>→</span>
+    <a href={wikiUrl(item.to)} target="_blank" rel="noopener noreferrer" style={{fontFamily:"'Rajdhani',sans-serif",fontWeight:600,color:C.textBright,textDecoration:"none",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flexShrink:1,minWidth:0}}
+      onMouseEnter={e=>{e.currentTarget.style.color=C.accent;}} onMouseLeave={e=>{e.currentTarget.style.color=C.textBright;}}>{item.to.replace(/_/g," ")}</a>
+    <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:8,color:C.textDim,flexShrink:0}}>{item.user}</span>
+  </div>);
+}
+function DeletedItem({item}){
+  const tip=`DELETED: ${item.title}\nDeleted by: ${item.user}${item.comment?"\nReason: "+item.comment:""}`;
+  return(<div className="row" title={tip} style={{padding:"5px 12px",borderBottom:`1px solid ${C.border}06`,animation:"fadeIn .3s ease",cursor:"help"}}>
+    <div style={{display:"flex",alignItems:"center",gap:6}}>
+      <span style={{width:5,height:5,borderRadius:"50%",background:C.red,flexShrink:0}}/>
+      <span style={{fontFamily:"'Rajdhani',sans-serif",fontWeight:600,fontSize:12,color:C.textDim,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,textDecoration:"line-through"}}>{item.title}</span>
+      <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:8.5,color:C.textDim,flexShrink:0}}>{timeAgo(item.timestamp)}</span>
+    </div>
+    <div style={{display:"flex",alignItems:"center",gap:6,marginTop:2,paddingLeft:11}}>
+      <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9,color:C.textDim}}>{item.user}</span>
+      {item.comment&&<span style={{fontSize:9,color:C.textDim,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,fontStyle:"italic"}}>{item.comment.slice(0,50)}</span>}
+      <span style={{fontSize:7.5,color:C.red,background:C.redDim,padding:"0 3px",borderRadius:2,fontFamily:"'IBM Plex Mono',monospace"}}>DEL</span>
+    </div>
+  </div>);
+}
+function RankedItem({rank,title,value,label,color}){
+  return(<div className="row" style={{display:"flex",alignItems:"center",gap:8,padding:"4px 12px",borderBottom:`1px solid ${C.border}06`}}>
+    <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:10,color:C.textDim,width:18,textAlign:"right",flexShrink:0}}>{rank}</span>
+    <a href={wikiUrl(title)} target="_blank" rel="noopener noreferrer" className="tl">{title}</a>
+    <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9.5,color:color,background:color===C.amber?C.amberDim:C.accentDim,padding:"1px 6px",borderRadius:2,flexShrink:0}}>{formatNum(value)} {label}</span>
+  </div>);
+}
+function SkeletonList({n=8}){return(<div style={{padding:6}}>{Array.from({length:n}).map((_,i)=>(<div key={i} style={{display:"flex",gap:8,alignItems:"center",padding:"5px 12px"}}><div className="skel" style={{width:18,height:10}}/><div className="skel" style={{flex:1,height:10}}/><div className="skel" style={{width:45,height:10}}/></div>))}</div>);}
+
+// ── App ──
+function App(){
+  const [feed,setFeed]=useState([]);
+  const [newArticles,setNewArticles]=useState([]);
+  const [deletedArticles,setDeletedArticles]=useState([]);
+  const [moves,setMoves]=useState([]);
+  const [activityData,setActivityData]=useState([]);
+  const [mostViewed,setMostViewed]=useState([]);
+  const [connected,setConnected]=useState(false);
+  const [totalEdits,setTotalEdits]=useState(0);
+  const [editsPerMin,setEditsPerMin]=useState(0);
+  const [showBots,setShowBots]=useState(false);
+  const [viewsLoading,setViewsLoading]=useState(true);
+  const [editsLoading,setEditsLoading]=useState(true);
+  const [p2Loading,setP2Loading]=useState(true);
+  const [editWindow,setEditWindow]=useState("1h");
+  const [editMode,setEditMode]=useState("edits");
+  const [viewWindow,setViewWindow]=useState("yesterday");
+  const [p2Mode,setP2Mode]=useState("new");
+  const [p2Window,setP2Window]=useState("6h");
+  const [widths,setWidths]=useState([35,20,22,23]);
+  const [tick,setTick]=useState(0);
+  const [paused,setPaused]=useState(false);
+  const pausedRef=useRef(false);
+  const pauseBufferRef=useRef([]);
+  const pauseNewBufferRef=useRef([]);
+
+  const feedRef=useRef([]);const newRef=useRef([]);const movesRef=useRef([]);
+  const liveRef=useRef({});const totalRef=useRef(0);
+  const startRef=useRef(Date.now());const containerRef=useRef(null);
+  const uniqueArtsRef=useRef(new Set());const uniqueEditorsRef=useRef(new Set());
+  const churnByArticleRef=useRef({});
+
+  const timeOpts=[{value:"10m",label:"10M"},{value:"1h",label:"1H"},{value:"6h",label:"6H"},{value:"24h",label:"24H"}];
+  const viewOpts=[{value:"yesterday",label:"YDAY"},{value:"week",label:"WEEK"},{value:"month",label:"MONTH"},{value:"year",label:"YEAR"}];
+  const p2TimeOpts=[{value:"1h",label:"1H"},{value:"6h",label:"6H"},{value:"12h",label:"12H"},{value:"24h",label:"24H"}];
+
+  // ── Loaders ──
+  const loadActivity=useCallback(()=>{
+    setEditsLoading(true);
+    fetchActivityData(hoursFor(editWindow)).then(d=>{setActivityData(d);setEditsLoading(false);});
+  },[editWindow]);
+
+  const loadP2=useCallback(()=>{
+    setP2Loading(true);
+    const h=hoursFor(p2Window);
+    if(p2Mode==="new") fetchRecentNewArticles(h).then(a=>{newRef.current=a;setNewArticles(a);setP2Loading(false);});
+    else if(p2Mode==="deleted") fetchDeletedArticles(h).then(a=>{setDeletedArticles(a);setP2Loading(false);});
+    else fetchMoves().then(m=>{movesRef.current=m;setMoves(m);setP2Loading(false);});
+  },[p2Mode,p2Window]);
+
+  // ── Countdowns ──
+  const editCountdown=useCountdown(REFRESH,loadActivity);
+  const p2Countdown=useCountdown(REFRESH,()=>{if(p2Mode==="deleted")loadP2();});
+
+  // ── Effects ──
+  useEffect(()=>{const iv=setInterval(()=>setTick(t=>t+1),30000);return()=>clearInterval(iv);},[]);
+  useEffect(()=>{loadActivity();},[editWindow]);
+  useEffect(()=>{setViewsLoading(true);fetchMostViewed(viewWindow).then(d=>{setMostViewed(d);setViewsLoading(false);});},[viewWindow]);
+  useEffect(()=>{loadP2();},[p2Mode,p2Window]);
+
+  // EventStreams
+  useEffect(()=>{
+    const src=new EventSource(STREAM_URL);
+    src.onopen=()=>setConnected(true);
+    src.onerror=()=>setConnected(false);
+    src.onmessage=ev=>{
+      try{
+        const d=JSON.parse(ev.data);
+        if(d.meta?.domain!=="en.wikipedia.org"||d.namespace!==0)return;
+        if(d.type!=="edit"&&d.type!=="new")return;
+        // Always count stats even when paused
+        totalRef.current++;
+        const el=(Date.now()-startRef.current)/60000;if(el>0)setEditsPerMin(Math.round(totalRef.current/el));
+        uniqueArtsRef.current.add(d.title);uniqueEditorsRef.current.add(d.user);
+        const sz=Math.abs((d.length?.new||0)-(d.length?.old||0));
+        churnByArticleRef.current[d.title]=(churnByArticleRef.current[d.title]||0)+sz;
+        if(!liveRef.current[d.title])liveRef.current[d.title]=0;liveRef.current[d.title]++;
+        // Buffer when paused, add to feed when not
+        const edit={id:d.meta.id,title:d.title,user:d.user,bot:d.bot||false,type:d.type,comment:d.comment||"",timestamp:Date.now(),length:d.length};
+        if(pausedRef.current){
+          pauseBufferRef.current.unshift(edit);
+          if(d.type==="new"&&!d.bot&&filterA(d.title))pauseNewBufferRef.current.unshift(edit);
+          setTotalEdits(totalRef.current);return;
+        }
+        feedRef.current=[edit,...feedRef.current].slice(0,150);setFeed([...feedRef.current]);
+        if(d.type==="new"&&!d.bot&&filterA(d.title)){newRef.current=[edit,...newRef.current].slice(0,100);setNewArticles([...newRef.current]);}
+        setTotalEdits(totalRef.current);
+      }catch(e){}
+    };
+    return()=>src.close();
+  },[]);
+
+  // Page moves stream
+  useEffect(()=>{
+    const moveSrc=new EventSource("https://stream.wikimedia.org/v2/stream/page-move");
+    moveSrc.onmessage=ev=>{
+      try{
+        const d=JSON.parse(ev.data);
+        if(d.meta?.domain!=="en.wikipedia.org"||d.page_namespace!==0)return;
+        const mv={id:"mv_"+Date.now(),from:(d.prior_state?.page_title||"").replace(/_/g," "),
+          to:(d.page_title||"").replace(/_/g," "),user:d.performer?.user_text||"",comment:d.comment||"",timestamp:Date.now()};
+        movesRef.current=[mv,...movesRef.current].slice(0,50);setMoves([...movesRef.current]);
+      }catch(e){}
+    };
+    return()=>moveSrc.close();
+  },[]);
+
+  const handleDrag=useCallback((i,dx)=>{
+    if(!containerRef.current)return;const tw=containerRef.current.offsetWidth;const p=(dx/tw)*100;
+    setWidths(prev=>{const n=[...prev];n[i]=Math.max(10,n[i]+p);n[i+1]=Math.max(10,n[i+1]-p);return n;});
+  },[]);
+
+  const togglePause=()=>{
+    if(pausedRef.current){
+      // Resuming — flush buffered edits into feed
+      feedRef.current=[...pauseBufferRef.current,...feedRef.current].slice(0,150);
+      setFeed([...feedRef.current]);
+      newRef.current=[...pauseNewBufferRef.current,...newRef.current].slice(0,100);
+      setNewArticles([...newRef.current]);
+      pauseBufferRef.current=[];
+      pauseNewBufferRef.current=[];
+    }
+    pausedRef.current=!pausedRef.current;setPaused(!paused);
+  };
+
+  const [showExportMenu,setShowExportMenu]=useState(false);
+
+  const getSnapshotData=()=>({
+    timestamp:new Date().toISOString(),
+    session:{uptime:fmtDur(Date.now()-startRef.current),totalEdits:totalRef.current,editsPerMin,
+      uniqueArticles:uniqueArtsRef.current.size,uniqueEditors:uniqueEditorsRef.current.size,
+      mostActive:mostChurned},
+    liveFeed:feed.slice(0,50).map(e=>({title:e.title,user:e.user,type:e.type,comment:e.comment,
+      byteDiff:e.length?.new&&e.length?.old?(e.length.new-e.length.old):0,timestamp:new Date(e.timestamp).toISOString()})),
+    newArticles:newArticles.slice(0,30).map(a=>({title:a.title,user:a.user,comment:a.comment,
+      bytes:a.length?.new||0,timestamp:new Date(a.timestamp).toISOString()})),
+    deletedArticles:deletedArticles.slice(0,30).map(a=>({title:a.title,user:a.user,reason:a.comment,
+      timestamp:new Date(a.timestamp).toISOString()})),
+    moves:moves.slice(0,20).map(m=>({from:m.from,to:m.to,user:m.user,reason:m.comment,
+      timestamp:new Date(m.timestamp).toISOString()})),
+    activity:{mode:editMode,window:editWindow,
+      data:sortedActivity.map(a=>({title:a.title,edits:a.edits,reverts:a.reverts,
+        totalBytes:a.totalBytes,netBytes:a.netBytes}))},
+    mostViewed:{window:viewWindow,data:mostViewed}
+  });
+
+  const exportJSON=()=>{
+    const blob=new Blob([JSON.stringify(getSnapshotData(),null,2)],{type:"application/json"});
+    const u=URL.createObjectURL(blob);const a=document.createElement("a");
+    a.href=u;a.download=`wikigotham-${new Date().toISOString().slice(0,19).replace(/:/g,"-")}.json`;
+    a.click();URL.revokeObjectURL(u);setShowExportMenu(false);
+  };
+
+  const exportHTML=()=>{
+    const s=getSnapshotData();
+    const row=(label,val)=>`<tr><td style="color:#4e5568;padding:4px 12px 4px 0">${label}</td><td style="color:#e2e6ee">${val}</td></tr>`;
+    const artRow=(i,t,extra)=>`<tr class="r"><td style="color:#4e5568;width:24px;text-align:right;padding:3px 8px 3px 0">${i}</td><td><a href="https://en.wikipedia.org/wiki/${encodeURIComponent(t.title||t)}" target="_blank" style="color:#e2e6ee;text-decoration:none">${t.title||t}</a></td><td style="color:#4e5568;font-size:11px;padding-left:8px">${extra||""}</td></tr>`;
+    const html=`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>WikiGotham Snapshot — ${s.timestamp}</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#05060a;color:#b0b6c4;font-family:'Courier New',monospace;font-size:12px;padding:30px 40px;max-width:1000px;margin:0 auto}
+h1{font-size:20px;color:#e2e6ee;letter-spacing:3px;margin-bottom:4px}h1 span{color:#00c8ff}
+.sub{color:#4e5568;font-size:11px;margin-bottom:24px}h2{font-size:13px;color:#00c8ff;text-transform:uppercase;letter-spacing:2px;margin:24px 0 8px;border-bottom:1px solid #181d2a;padding-bottom:4px}
+table{border-collapse:collapse;width:100%;margin-bottom:8px}td{padding:3px 0;vertical-align:top}
+.r:hover{background:#151a24}a:hover{color:#00c8ff !important}.del{text-decoration:line-through;color:#ff3858}
+.tag{display:inline-block;padding:1px 5px;border-radius:2px;font-size:10px;margin-left:4px}
+</style></head><body>
+<h1>WIKI<span>GOTHAM</span> SNAPSHOT</h1>
+<div class="sub">${s.timestamp} · Session: ${s.session.uptime} · ${s.session.totalEdits} edits · ${s.session.editsPerMin}/min · ${s.session.uniqueArticles} articles · ${s.session.uniqueEditors} editors</div>
+
+<h2>⚡ Live Feed (last ${s.liveFeed.length})</h2>
+<table>${s.liveFeed.map((e,i)=>artRow(i+1,e,`${e.user} · ${e.byteDiff>0?"+":""}${e.byteDiff}b${e.comment?" · <em>"+e.comment.slice(0,60)+"</em>":""}${e.type==="new"?'<span class="tag" style="color:#00e68a;background:rgba(0,230,138,0.08)">NEW</span>':""}`)).join("")}</table>
+
+<h2>🆕 New Articles (${s.newArticles.length})</h2>
+<table>${s.newArticles.map((a,i)=>artRow(i+1,a,`${a.user} · ${a.bytes}b${a.comment?" · <em>"+a.comment.slice(0,60)+"</em>":""}`)).join("")}</table>
+
+<h2>🗑 Deleted Articles (${s.deletedArticles.length})</h2>
+<table>${s.deletedArticles.map((a,i)=>`<tr class="r"><td style="color:#4e5568;width:24px;text-align:right;padding:3px 8px 3px 0">${i+1}</td><td class="del">${a.title}</td><td style="color:#4e5568;font-size:11px;padding-left:8px">${a.user}${a.reason?" · <em>"+a.reason.slice(0,60)+"</em>":""}</td></tr>`).join("")}</table>
+
+<h2>↔ Page Moves (${s.moves.length})</h2>
+<table>${s.moves.map((m,i)=>`<tr class="r"><td style="color:#4e5568;width:24px;text-align:right;padding:3px 8px 3px 0">${i+1}</td><td style="color:#4e5568">${m.from.replace(/_/g," ")}</td><td style="color:#ffa800;padding:0 6px">→</td><td><a href="https://en.wikipedia.org/wiki/${encodeURIComponent(m.to)}" target="_blank" style="color:#e2e6ee;text-decoration:none">${m.to.replace(/_/g," ")}</a></td><td style="color:#4e5568;font-size:11px;padding-left:8px">${m.user}</td></tr>`).join("")}</table>
+
+<h2>✎ Activity — ${s.activity.mode.toUpperCase()} (${s.activity.window})</h2>
+<table>${s.activity.data.map((a,i)=>artRow(i+1,a,`${a.edits}e${a.reverts?" · <span style='color:#ff3858'>"+a.reverts+"r</span>":""} · ${Math.round(a.totalBytes/1024)}kb churn · net ${a.netBytes>0?"+":""}${Math.round(a.netBytes/1024)}kb`)).join("")}</table>
+
+<h2>▲ Most Viewed — ${s.mostViewed.window}</h2>
+<table>${s.mostViewed.data.map((a,i)=>artRow(i+1,a,`${formatNum(a.views)} views`)).join("")}</table>
+
+<div style="margin-top:30px;padding-top:12px;border-top:1px solid #181d2a;color:#4e5568;font-size:10px">WikiGotham Intel · Snapshot exported ${s.timestamp}</div>
+</body></html>`;
+    const blob=new Blob([html],{type:"text/html"});
+    const u=URL.createObjectURL(blob);const a=document.createElement("a");
+    a.href=u;a.download=`wikigotham-${new Date().toISOString().slice(0,19).replace(/:/g,"-")}.html`;
+    a.click();URL.revokeObjectURL(u);setShowExportMenu(false);
+  };
+
+  const sortedActivity=useMemo(()=>{
+    const data=[...activityData];
+    if(editMode==="edits")return data.sort((a,b)=>b.edits-a.edits).slice(0,50);
+    if(editMode==="kb")return data.sort((a,b)=>b.totalBytes-a.totalBytes).slice(0,50);
+    return data.filter(a=>a.reverts>0).sort((a,b)=>b.reverts-a.reverts||b.edits-a.edits).slice(0,50);
+  },[activityData,editMode]);
+
+  const filteredFeed=showBots?feed:feed.filter(e=>!e.bot);
+  const mostChurned=useMemo(()=>{
+    const entries=Object.entries(churnByArticleRef.current);
+    if(!entries.length)return{title:"—",size:0};
+    entries.sort((a,b)=>b[1]-a[1]);return{title:entries[0][0],size:entries[0][1]};
+  },[totalEdits]);
+
+  return(
+    <div style={{width:"100%",minHeight:"100vh",background:C.bg,display:"flex",flexDirection:"column",fontFamily:"'IBM Plex Sans',sans-serif",color:C.text}}>
+      {/* HEADER */}
+      <div style={{padding:"7px 20px",borderBottom:`1px solid ${C.border}`,background:C.panel,display:"flex",alignItems:"center",gap:12,flexShrink:0}}>
+        <div style={{fontFamily:"'Rajdhani',sans-serif",fontWeight:700,fontSize:20,color:C.textBright,letterSpacing:3}}>
+          WIKI<span style={{color:C.accent}}>GOTHAM</span><span style={{fontSize:11,color:C.amber,marginLeft:8,fontWeight:500,letterSpacing:1}}>INTEL</span>
+        </div>
+        <div style={{width:1,height:22,background:C.border}}/>
+        <div style={{display:"flex",alignItems:"center",gap:5}}>
+          <span style={{width:6,height:6,borderRadius:"50%",background:connected?C.green:C.red,animation:connected?"blink 2s infinite":"none"}}/>
+          <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:10,color:connected?C.green:C.red}}>{connected?"LIVE":"OFFLINE"}</span>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:12,marginLeft:"auto"}}>
+          <div style={{textAlign:"center"}}><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:15,color:C.textBright,fontWeight:500}}>{formatNum(totalEdits)}</div><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:7,color:C.textDim,textTransform:"uppercase",letterSpacing:1}}>Edits</div></div>
+          <div style={{width:1,height:22,background:C.border}}/>
+          <div style={{textAlign:"center"}}><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:15,color:C.accent,fontWeight:500}}>{editsPerMin}</div><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:7,color:C.textDim,textTransform:"uppercase",letterSpacing:1}}>Per Min</div></div>
+          <div style={{width:1,height:22,background:C.border}}/>
+          <div style={{textAlign:"center"}}><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:15,color:C.green,fontWeight:500}}>{newArticles.length}</div><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:7,color:C.textDim,textTransform:"uppercase",letterSpacing:1}}>New</div></div>
+        </div>
+      </div>
+
+      {/* PANELS */}
+      <div ref={containerRef} style={{height:"calc(100vh - 82px)",display:"flex",overflow:"hidden",flexShrink:0}}>
+        {/* LIVE FEED */}
+        <div style={{width:widths[0]+"%",display:"flex",flexDirection:"column",minWidth:0,overflow:"hidden"}}>
+          <div style={{padding:"6px 12px",borderBottom:`1px solid ${C.border}`,background:C.panel,display:"flex",alignItems:"center",gap:6}}>
+            <span style={{fontSize:11}}>⚡</span>
+            <div title="Real-time stream of every edit happening on English Wikipedia right now" style={{fontFamily:"'Rajdhani',sans-serif",fontWeight:700,fontSize:11,color:C.accent,textTransform:"uppercase",letterSpacing:2,flex:1,cursor:"help"}}>Live Feed</div>
+            <button title={paused?"Resume live feed — edits are still being counted in the background":"Pause live feed — freezes the display so you can read without scrolling. Stats keep counting."} onClick={togglePause} style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9,padding:"1px 6px",borderRadius:2,border:`1px solid ${paused?C.amber:C.border}`,background:paused?C.amberDim:"transparent",color:paused?C.amber:C.textDim,cursor:"pointer"}}>{paused?"▶ RESUME":"⏸ PAUSE"}</button>
+            <label style={{display:"flex",alignItems:"center",gap:3,cursor:"pointer",fontSize:9,color:C.textDim,fontFamily:"'IBM Plex Mono',monospace"}}>
+              <input type="checkbox" checked={showBots} onChange={()=>setShowBots(!showBots)} style={{accentColor:C.accent,width:10,height:10}}/> Bots</label>
+            <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9,color:C.textDim}}>{filteredFeed.length}</span>
+            {connected&&<span style={{width:5,height:5,borderRadius:"50%",background:paused?C.amber:C.green,animation:paused?"none":"blink 2s infinite"}}/>}
+          </div>
+          <div style={{flex:1,overflow:"auto"}}>{filteredFeed.length===0?(
+            <div style={{padding:30,textAlign:"center",color:C.textDim,fontFamily:"'IBM Plex Mono',monospace",fontSize:10}}>{connected?"Waiting...":"Connecting..."}<div style={{marginTop:6}}><span style={{display:"inline-block",width:12,height:12,border:`2px solid ${C.textDim}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin .8s linear infinite"}}/></div></div>
+          ):filteredFeed.map(e=>(<FeedItem key={e.id} edit={e}/>))}</div>
+        </div>
+
+        <Divider onDrag={dx=>handleDrag(0,dx)}/>
+
+        {/* NEW / MOVE / DEL */}
+        <div style={{width:widths[1]+"%",display:"flex",flexDirection:"column",minWidth:0,overflow:"hidden"}}>
+          <div style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`,background:C.panel}}>
+            <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:3}}>
+              <ToggleBtn options={[
+                {value:"new",label:"NEW",color:C.green,tip:"Newly created Wikipedia articles"},
+                {value:"moved",label:"MOVE",color:C.amber,tip:"Articles renamed or moved — can signal notability changes"},
+                {value:"deleted",label:"DEL",color:C.red,tip:"Articles deleted by admins (notability, copyright, etc.)"}
+              ]} value={p2Mode} onChange={setP2Mode}/>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:4}}>
+              {p2Mode!=="moved"&&<TimeSelector options={p2TimeOpts} value={p2Window} onChange={setP2Window}/>}
+              {p2Mode==="moved"&&<span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:8,color:C.textDim}}>last 24h + live</span>}
+              <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:8,color:C.textDim,marginLeft:"auto"}}>
+                {p2Mode==="new"?newArticles.length:p2Mode==="moved"?moves.length:deletedArticles.length}
+              </span>
+            </div>
+          </div>
+          {p2Mode==="deleted"&&<CountdownBar remaining={p2Countdown} total={REFRESH} color={C.red}/>}
+          <div style={{flex:1,overflow:"auto"}}>
+            {p2Loading?<SkeletonList n={6}/>
+            :p2Mode==="new"?(newArticles.length===0?<div style={{padding:30,textAlign:"center",color:C.textDim,fontFamily:"'IBM Plex Mono',monospace",fontSize:10}}>None</div>:newArticles.map(e=>(<NewItem key={e.id} item={e}/>)))
+            :p2Mode==="moved"?(moves.length===0?<div style={{padding:30,textAlign:"center",color:C.textDim,fontFamily:"'IBM Plex Mono',monospace",fontSize:10}}>No moves</div>:moves.map(m=>(<MoveItem key={m.id} item={m}/>)))
+            :(deletedArticles.length===0?<div style={{padding:30,textAlign:"center",color:C.textDim,fontFamily:"'IBM Plex Mono',monospace",fontSize:10}}>None</div>:deletedArticles.map(e=>(<DeletedItem key={e.id} item={e}/>)))}
+          </div>
+        </div>
+
+        <Divider onDrag={dx=>handleDrag(1,dx)}/>
+
+        {/* EDITS / CHURN / REVERTS */}
+        <div style={{width:widths[2]+"%",display:"flex",flexDirection:"column",minWidth:0,overflow:"hidden"}}>
+          <div style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`,background:C.panel}}>
+            <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:3}}>
+              <ToggleBtn options={[
+                {value:"edits",label:"EDITS",color:C.amber,tip:"Ranked by number of edits — how many times an article was changed"},
+                {value:"kb",label:"CHURN",color:C.green,tip:"Ranked by total content moved (bytes added + removed) — how much text is being touched"},
+                {value:"reverts",label:"REVERTS",color:C.red,tip:"Ranked by revert/undo count — articles where editors are fighting over content"}
+              ]} value={editMode} onChange={setEditMode}/>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:4}}>
+              <TimeSelector options={timeOpts} value={editWindow} onChange={setEditWindow}/>
+              <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:8,color:C.textDim,marginLeft:"auto"}}>{sortedActivity.length}</span>
+            </div>
+          </div>
+          <CountdownBar remaining={editCountdown} total={REFRESH} color={editMode==="edits"?C.amber:editMode==="kb"?C.green:C.red}/>
+          <div style={{flex:1,overflow:"auto"}}>{editsLoading?<SkeletonList/>:sortedActivity.length===0?
+            <div style={{padding:30,textAlign:"center",color:C.textDim,fontFamily:"'IBM Plex Mono',monospace",fontSize:10}}>No data</div>
+            :sortedActivity.map((item,i)=>{
+              const net=item.netBytes||0;
+              const netColor=net>0?C.green:net<0?C.red:C.textDim;
+              const netStr=Math.abs(net)>=1024?(net>0?"+":"")+Math.round(net/1024)+"kb":(net>0?"+":"")+net+"b";
+              const churnStr=item.totalBytes>=1024?Math.round(item.totalBytes/1024)+"kb":item.totalBytes+"b";
+              return(<div key={item.title} className="row" style={{display:"flex",alignItems:"center",gap:5,padding:"4px 10px",borderBottom:`1px solid ${C.border}06`}}>
+                <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:10,color:C.textDim,width:16,textAlign:"right",flexShrink:0}}>{i+1}</span>
+                <a href={wikiUrl(item.title)} target="_blank" rel="noopener noreferrer" className="tl">{item.title}</a>
+                {editMode==="edits"&&<>
+                  <span title="Number of edits" style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9,color:C.amber,background:C.amberDim,padding:"1px 4px",borderRadius:2,flexShrink:0,cursor:"help"}}>{item.edits}</span>
+                  {item.reverts>0&&<span title="Reverts" style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9,color:C.red,background:C.redDim,padding:"1px 4px",borderRadius:2,flexShrink:0,cursor:"help"}}>{item.reverts}r</span>}
+                </>}
+                {editMode==="kb"&&<>
+                  <span title="Total churn — all bytes added + removed" style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9,color:C.accent,background:C.accentDim,padding:"1px 4px",borderRadius:2,flexShrink:0,cursor:"help"}}>{churnStr}</span>
+                  <span title="Net change — positive = grew, negative = shrank" style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9,color:netColor,background:net>0?C.greenDim:net<0?C.redDim:"transparent",padding:"1px 4px",borderRadius:2,flexShrink:0,cursor:"help"}}>{netStr}</span>
+                  <span title="Edit count" style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9,color:C.textDim,flexShrink:0,cursor:"help"}}>{item.edits}e</span>
+                </>}
+                {editMode==="reverts"&&<>
+                  <span title="Reverts — edits undone by others" style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9,color:C.red,background:C.redDim,padding:"1px 4px",borderRadius:2,flexShrink:0,cursor:"help"}}>{item.reverts}r</span>
+                  <span title="Total edits" style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9,color:C.textDim,flexShrink:0,cursor:"help"}}>{item.edits}e</span>
+                  <span title="Revert ratio — higher = more contested" style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9,color:item.edits>0&&(item.reverts/item.edits)>=.5?C.red:C.amber,flexShrink:0,cursor:"help"}}>{item.edits>0?Math.round((item.reverts/item.edits)*100):0}%</span>
+                </>}
+              </div>);
+            })}</div>
+        </div>
+
+        <Divider onDrag={dx=>handleDrag(2,dx)}/>
+
+        {/* VIEWED */}
+        <div style={{width:widths[3]+"%",display:"flex",flexDirection:"column",minWidth:0,overflow:"hidden"}}>
+          <div style={{padding:"6px 12px",borderBottom:`1px solid ${C.border}`,background:C.panel,display:"flex",alignItems:"center",gap:5}}>
+            <span style={{fontSize:11}}>▲</span>
+            <div title="Most viewed Wikipedia articles — ranked by page views from the Wikimedia API" style={{fontFamily:"'Rajdhani',sans-serif",fontWeight:700,fontSize:11,color:C.accent,textTransform:"uppercase",letterSpacing:2,cursor:"help"}}>Viewed</div>
+            <div style={{marginLeft:"auto"}}><TimeSelector options={viewOpts} value={viewWindow} onChange={setViewWindow}/></div>
+          </div>
+          <div style={{flex:1,overflow:"auto"}}>{viewsLoading?<SkeletonList/>:mostViewed.length===0?
+            <div style={{padding:30,textAlign:"center",color:C.textDim,fontFamily:"'IBM Plex Mono',monospace",fontSize:10}}>No data</div>
+            :mostViewed.map((item,i)=>(<RankedItem key={item.title} rank={i+1} title={item.title} value={item.views} label="views" color={C.accent}/>))}</div>
+        </div>
+      </div>
+
+      {/* SESSION BAR */}
+      <div style={{borderTop:`1px solid ${C.border}`,background:C.panel,padding:"4px 20px",display:"flex",alignItems:"center",gap:14,flexShrink:0}}>
+        <div style={{fontFamily:"'Rajdhani',sans-serif",fontWeight:700,fontSize:10,color:C.accent,textTransform:"uppercase",letterSpacing:1}}>Session</div>
+        <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9.5,color:C.textDim}}><span style={{color:C.textBright}}>{fmtDur(Date.now()-startRef.current)}</span></span>
+        <div style={{width:1,height:12,background:C.border}}/>
+        <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9.5,color:C.textDim}}><span style={{color:C.textBright}}>{uniqueArtsRef.current.size}</span> articles</span>
+        <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9.5,color:C.textDim}}><span style={{color:C.textBright}}>{uniqueEditorsRef.current.size}</span> editors</span>
+        <div style={{width:1,height:12,background:C.border}}/>
+        <span title="Article with the most total content moved (bytes added + removed combined) this session" style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9.5,color:C.textDim,cursor:"help"}}>
+          most active: <a href={wikiUrl(mostChurned.title)} target="_blank" rel="noopener noreferrer" style={{color:C.amber,textDecoration:"none"}}
+            onMouseEnter={e=>{e.currentTarget.style.textDecoration="underline";}} onMouseLeave={e=>{e.currentTarget.style.textDecoration="none";}}>
+            {mostChurned.title.length>25?mostChurned.title.slice(0,25)+"…":mostChurned.title}</a> ({formatNum(mostChurned.size)}b churn)
+        </span>
+        <span style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8}}>
+          <div style={{position:"relative"}}>
+            <button title="Export current dashboard snapshot" onClick={()=>setShowExportMenu(!showExportMenu)} style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:8,padding:"2px 8px",borderRadius:2,border:`1px solid ${showExportMenu?C.accent:C.border}`,background:showExportMenu?C.accentDim:"transparent",color:showExportMenu?C.accent:C.textDim,cursor:"pointer"}}
+              onMouseEnter={e=>{if(!showExportMenu){e.currentTarget.style.borderColor=C.accent;e.currentTarget.style.color=C.accent;}}}
+              onMouseLeave={e=>{if(!showExportMenu){e.currentTarget.style.borderColor=C.border;e.currentTarget.style.color=C.textDim;}}}>⬇ EXPORT</button>
+            {showExportMenu&&<div style={{position:"absolute",bottom:"100%",right:0,marginBottom:4,background:C.panel,border:`1px solid ${C.border}`,borderRadius:4,overflow:"hidden",boxShadow:"0 -4px 20px rgba(0,0,0,.5)",zIndex:100}}>
+              <button onClick={exportJSON} style={{display:"block",width:"100%",padding:"6px 16px",fontFamily:"'IBM Plex Mono',monospace",fontSize:9,color:C.text,background:"transparent",border:"none",cursor:"pointer",textAlign:"left",whiteSpace:"nowrap"}}
+                onMouseEnter={e=>{e.currentTarget.style.background=C.cardHover;e.currentTarget.style.color=C.accent;}}
+                onMouseLeave={e=>{e.currentTarget.style.background="transparent";e.currentTarget.style.color=C.text;}}>📄 JSON — raw data</button>
+              <button onClick={exportHTML} style={{display:"block",width:"100%",padding:"6px 16px",fontFamily:"'IBM Plex Mono',monospace",fontSize:9,color:C.text,background:"transparent",border:"none",cursor:"pointer",textAlign:"left",whiteSpace:"nowrap",borderTop:`1px solid ${C.border}`}}
+                onMouseEnter={e=>{e.currentTarget.style.background=C.cardHover;e.currentTarget.style.color=C.accent;}}
+                onMouseLeave={e=>{e.currentTarget.style.background="transparent";e.currentTarget.style.color=C.text;}}>🌐 HTML — styled report</button>
+            </div>}
+          </div>
+          <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9,color:C.textDim}}><span style={{color:connected?C.green:C.red}}>●</span> v9</span>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
