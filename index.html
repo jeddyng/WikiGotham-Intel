@@ -28,6 +28,11 @@ html,body{width:100%;height:100%;overflow:hidden;background:#05060a;}
 .divider:hover,.divider.active{background:rgba(0,200,255,0.15);}
 .divider::after{content:'';position:absolute;top:0;bottom:0;left:2px;width:1px;background:#181d2a;}
 .divider:hover::after,.divider.active::after{background:#00c8ff;}
+@media(max-width:768px){
+  .divider{display:none !important;}
+  .tl{font-size:11px;}
+  .row{padding:4px 8px !important;}
+}
 </style>
 </head>
 <body>
@@ -226,6 +231,8 @@ function App(){
   const [widths,setWidths]=useState([35,20,22,23]);
   const [tick,setTick]=useState(0);
   const [paused,setPaused]=useState(false);
+  const [isMobile,setIsMobile]=useState(window.innerWidth<=768);
+  const [mobileTab,setMobileTab]=useState(0); // 0=feed, 1=new/move/del, 2=edits, 3=viewed
   const pausedRef=useRef(false);
   const pauseBufferRef=useRef([]);
   const pauseNewBufferRef=useRef([]);
@@ -328,6 +335,7 @@ function App(){
 
   // ── Effects ──
   useEffect(()=>{const iv=setInterval(()=>setTick(t=>t+1),30000);return()=>clearInterval(iv);},[]);
+  useEffect(()=>{const h=()=>setIsMobile(window.innerWidth<=768);window.addEventListener("resize",h);return()=>window.removeEventListener("resize",h);},[]);
   useEffect(()=>{startLoader();},[]);  // Start shared loader on mount
   useEffect(()=>{setViewsLoading(true);fetchMostViewed(viewWindow).then(d=>{setMostViewed(d);setViewsLoading(false);});},[viewWindow]);
   useEffect(()=>{loadP2();},[p2Mode,p2Window]);
@@ -476,28 +484,36 @@ table{border-collapse:collapse;width:100%;margin-bottom:8px}td{padding:3px 0;ver
   return(
     <div style={{width:"100%",minHeight:"100vh",background:C.bg,display:"flex",flexDirection:"column",fontFamily:"'IBM Plex Sans',sans-serif",color:C.text}}>
       {/* HEADER */}
-      <div style={{padding:"7px 20px",borderBottom:`1px solid ${C.border}`,background:C.panel,display:"flex",alignItems:"center",gap:12,flexShrink:0}}>
-        <div style={{fontFamily:"'Rajdhani',sans-serif",fontWeight:700,fontSize:20,color:C.textBright,letterSpacing:3}}>
-          WIKI<span style={{color:C.accent}}>GOTHAM</span><span style={{fontSize:11,color:C.amber,marginLeft:8,fontWeight:500,letterSpacing:1}}>INTEL</span>
+      <div style={{padding:isMobile?"5px 10px":"7px 20px",borderBottom:`1px solid ${C.border}`,background:C.panel,display:"flex",alignItems:"center",gap:isMobile?6:12,flexShrink:0,flexWrap:isMobile?"wrap":"nowrap"}}>
+        <div style={{fontFamily:"'Rajdhani',sans-serif",fontWeight:700,fontSize:isMobile?16:20,color:C.textBright,letterSpacing:3}}>
+          WIKI<span style={{color:C.accent}}>GOTHAM</span><span style={{fontSize:isMobile?9:11,color:C.amber,marginLeft:6,fontWeight:500,letterSpacing:1}}>INTEL</span>
         </div>
-        <div style={{width:1,height:22,background:C.border}}/>
         <div style={{display:"flex",alignItems:"center",gap:5}}>
           <span style={{width:6,height:6,borderRadius:"50%",background:connected?C.green:C.red,animation:connected?"blink 2s infinite":"none"}}/>
-          <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:10,color:connected?C.green:C.red}}>{connected?"LIVE":"OFFLINE"}</span>
+          <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:isMobile?8:10,color:connected?C.green:C.red}}>{connected?"LIVE":"OFF"}</span>
         </div>
-        <div style={{display:"flex",alignItems:"center",gap:12,marginLeft:"auto"}}>
-          <div style={{textAlign:"center"}}><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:15,color:C.textBright,fontWeight:500}}>{formatNum(totalEdits)}</div><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:7,color:C.textDim,textTransform:"uppercase",letterSpacing:1}}>Edits</div></div>
+        <div style={{display:"flex",alignItems:"center",gap:isMobile?8:12,marginLeft:"auto"}}>
+          <div style={{textAlign:"center"}}><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:isMobile?13:15,color:C.textBright,fontWeight:500}}>{formatNum(totalEdits)}</div><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:7,color:C.textDim,textTransform:"uppercase",letterSpacing:1}}>Edits</div></div>
           <div style={{width:1,height:22,background:C.border}}/>
-          <div style={{textAlign:"center"}}><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:15,color:C.accent,fontWeight:500}}>{editsPerMin}</div><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:7,color:C.textDim,textTransform:"uppercase",letterSpacing:1}}>Per Min</div></div>
-          <div style={{width:1,height:22,background:C.border}}/>
-          <div style={{textAlign:"center"}}><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:15,color:C.green,fontWeight:500}}>{newArticles.length}</div><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:7,color:C.textDim,textTransform:"uppercase",letterSpacing:1}}>New</div></div>
+          <div style={{textAlign:"center"}}><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:isMobile?13:15,color:C.accent,fontWeight:500}}>{editsPerMin}</div><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:7,color:C.textDim,textTransform:"uppercase",letterSpacing:1}}>Per Min</div></div>
+          {!isMobile&&<><div style={{width:1,height:22,background:C.border}}/>
+          <div style={{textAlign:"center"}}><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:15,color:C.green,fontWeight:500}}>{newArticles.length}</div><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:7,color:C.textDim,textTransform:"uppercase",letterSpacing:1}}>New</div></div></>}
         </div>
       </div>
 
+      {/* MOBILE TAB BAR */}
+      {isMobile&&<div style={{display:"flex",borderBottom:`1px solid ${C.border}`,background:C.panel,flexShrink:0}}>
+        {[{label:"⚡ Feed",i:0},{label:"🆕 New",i:1},{label:"✎ Edits",i:2},{label:"▲ Views",i:3}].map(t=>(
+          <button key={t.i} onClick={()=>setMobileTab(t.i)} style={{flex:1,padding:"8px 0",fontFamily:"'Rajdhani',sans-serif",fontWeight:600,fontSize:11,
+            background:mobileTab===t.i?C.accentDim:"transparent",color:mobileTab===t.i?C.accent:C.textDim,
+            border:"none",borderBottom:mobileTab===t.i?`2px solid ${C.accent}`:"2px solid transparent",cursor:"pointer"}}>{t.label}</button>
+        ))}
+      </div>}
+
       {/* PANELS */}
-      <div ref={containerRef} style={{height:"calc(100vh - 82px)",display:"flex",overflow:"hidden",flexShrink:0}}>
+      <div ref={containerRef} style={{height:isMobile?"calc(100vh - 110px)":"calc(100vh - 82px)",display:"flex",overflow:"hidden",flexShrink:0}}>
         {/* LIVE FEED */}
-        <div style={{width:widths[0]+"%",display:"flex",flexDirection:"column",minWidth:0,overflow:"hidden"}}>
+        {(!isMobile||mobileTab===0)&&<div style={{width:isMobile?"100%":widths[0]+"%",display:"flex",flexDirection:"column",minWidth:0,overflow:"hidden"}}>
           <div style={{padding:"6px 12px",borderBottom:`1px solid ${C.border}`,background:C.panel,display:"flex",alignItems:"center",gap:6}}>
             <span style={{fontSize:11}}>⚡</span>
             <div title="Real-time stream of every edit happening on English Wikipedia right now" style={{fontFamily:"'Rajdhani',sans-serif",fontWeight:700,fontSize:11,color:C.accent,textTransform:"uppercase",letterSpacing:2,flex:1,cursor:"help"}}>Live Feed</div>
@@ -510,12 +526,12 @@ table{border-collapse:collapse;width:100%;margin-bottom:8px}td{padding:3px 0;ver
           <div style={{flex:1,overflow:"auto"}}>{filteredFeed.length===0?(
             <div style={{padding:30,textAlign:"center",color:C.textDim,fontFamily:"'IBM Plex Mono',monospace",fontSize:10}}>{connected?"Waiting...":"Connecting..."}<div style={{marginTop:6}}><span style={{display:"inline-block",width:12,height:12,border:`2px solid ${C.textDim}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin .8s linear infinite"}}/></div></div>
           ):filteredFeed.map(e=>(<FeedItem key={e.id} edit={e}/>))}</div>
-        </div>
+        </div>}
 
-        <Divider onDrag={dx=>handleDrag(0,dx)}/>
+        {!isMobile&&<Divider onDrag={dx=>handleDrag(0,dx)}/>}
 
         {/* NEW / MOVE / DEL */}
-        <div style={{width:widths[1]+"%",display:"flex",flexDirection:"column",minWidth:0,overflow:"hidden"}}>
+        {(!isMobile||mobileTab===1)&&<div style={{width:isMobile?"100%":widths[1]+"%",display:"flex",flexDirection:"column",minWidth:0,overflow:"hidden"}}>
           <div style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`,background:C.panel}}>
             <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:3}}>
               <ToggleBtn options={[
@@ -539,12 +555,12 @@ table{border-collapse:collapse;width:100%;margin-bottom:8px}td{padding:3px 0;ver
             :p2Mode==="moved"?(moves.length===0?<div style={{padding:30,textAlign:"center",color:C.textDim,fontFamily:"'IBM Plex Mono',monospace",fontSize:10}}>No moves</div>:moves.map(m=>(<MoveItem key={m.id} item={m}/>)))
             :(deletedArticles.length===0?<div style={{padding:30,textAlign:"center",color:C.textDim,fontFamily:"'IBM Plex Mono',monospace",fontSize:10}}>None</div>:deletedArticles.map(e=>(<DeletedItem key={e.id} item={e}/>)))}
           </div>
-        </div>
+        </div>}
 
-        <Divider onDrag={dx=>handleDrag(1,dx)}/>
+        {!isMobile&&<Divider onDrag={dx=>handleDrag(1,dx)}/>}
 
         {/* EDITS / CHURN / REVERTS */}
-        <div style={{width:widths[2]+"%",display:"flex",flexDirection:"column",minWidth:0,overflow:"hidden"}}>
+        {(!isMobile||mobileTab===2)&&<div style={{width:isMobile?"100%":widths[2]+"%",display:"flex",flexDirection:"column",minWidth:0,overflow:"hidden"}}>
           <div style={{padding:"5px 8px",borderBottom:`1px solid ${C.border}`,background:C.panel}}>
             <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:3}}>
               <ToggleBtn options={[
@@ -593,12 +609,12 @@ table{border-collapse:collapse;width:100%;margin-bottom:8px}td{padding:3px 0;ver
                 </>}
               </div>);
             })}</div>
-        </div>
+        </div>}
 
-        <Divider onDrag={dx=>handleDrag(2,dx)}/>
+        {!isMobile&&<Divider onDrag={dx=>handleDrag(2,dx)}/>}
 
         {/* VIEWED */}
-        <div style={{width:widths[3]+"%",display:"flex",flexDirection:"column",minWidth:0,overflow:"hidden"}}>
+        {(!isMobile||mobileTab===3)&&<div style={{width:isMobile?"100%":widths[3]+"%",display:"flex",flexDirection:"column",minWidth:0,overflow:"hidden"}}>
           <div style={{padding:"6px 12px",borderBottom:`1px solid ${C.border}`,background:C.panel,display:"flex",alignItems:"center",gap:5}}>
             <span style={{fontSize:11}}>▲</span>
             <div title="Most viewed Wikipedia articles — ranked by page views from the Wikimedia API" style={{fontFamily:"'Rajdhani',sans-serif",fontWeight:700,fontSize:11,color:C.accent,textTransform:"uppercase",letterSpacing:2,cursor:"help"}}>Viewed</div>
@@ -618,22 +634,22 @@ table{border-collapse:collapse;width:100%;margin-bottom:8px}td{padding:3px 0;ver
           <div style={{flex:1,overflow:"auto"}}>{viewsLoading?<SkeletonList/>:mostViewed.length===0?
             <div style={{padding:30,textAlign:"center",color:C.textDim,fontFamily:"'IBM Plex Mono',monospace",fontSize:10}}>No data</div>
             :mostViewed.map((item,i)=>(<RankedItem key={item.title} rank={i+1} title={item.title} value={item.views} label="views" color={C.accent}/>))}</div>
-        </div>
+        </div>}
       </div>
 
       {/* SESSION BAR */}
-      <div style={{borderTop:`1px solid ${C.border}`,background:C.panel,padding:"4px 20px",display:"flex",alignItems:"center",gap:14,flexShrink:0}}>
+      <div style={{borderTop:`1px solid ${C.border}`,background:C.panel,padding:isMobile?"4px 10px":"4px 20px",display:"flex",alignItems:"center",gap:isMobile?8:14,flexShrink:0,flexWrap:isMobile?"wrap":"nowrap",fontSize:isMobile?8:undefined}}>
         <div style={{fontFamily:"'Rajdhani',sans-serif",fontWeight:700,fontSize:10,color:C.accent,textTransform:"uppercase",letterSpacing:1}}>Session</div>
         <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9.5,color:C.textDim}}><span style={{color:C.textBright}}>{fmtDur(Date.now()-startRef.current)}</span></span>
         <div style={{width:1,height:12,background:C.border}}/>
         <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9.5,color:C.textDim}}><span style={{color:C.textBright}}>{uniqueArtsRef.current.size}</span> articles</span>
         <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9.5,color:C.textDim}}><span style={{color:C.textBright}}>{uniqueEditorsRef.current.size}</span> editors</span>
-        <div style={{width:1,height:12,background:C.border}}/>
+        {!isMobile&&<><div style={{width:1,height:12,background:C.border}}/>
         <span title="Article with the most total content moved (bytes added + removed combined) this session" style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9.5,color:C.textDim,cursor:"help"}}>
           most active: <a href={wikiUrl(mostChurned.title)} target="_blank" rel="noopener noreferrer" style={{color:C.amber,textDecoration:"none"}}
             onMouseEnter={e=>{e.currentTarget.style.textDecoration="underline";}} onMouseLeave={e=>{e.currentTarget.style.textDecoration="none";}}>
             {mostChurned.title.length>25?mostChurned.title.slice(0,25)+"…":mostChurned.title}</a> ({formatNum(mostChurned.size)}b churn)
-        </span>
+        </span></>}
         <span style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:8}}>
           <div style={{position:"relative"}}>
             <button title="Export current dashboard snapshot" onClick={()=>setShowExportMenu(!showExportMenu)} style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:8,padding:"2px 8px",borderRadius:2,border:`1px solid ${showExportMenu?C.accent:C.border}`,background:showExportMenu?C.accentDim:"transparent",color:showExportMenu?C.accent:C.textDim,cursor:"pointer"}}
