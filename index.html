@@ -49,27 +49,6 @@ function fmtDur(ms){const m=Math.floor(ms/60000),h=Math.floor(m/60);if(h>0)retur
 function hoursFor(w){return w==="10m"?.17:w==="1h"?1:w==="6h"?6:w==="12h"?12:24;}
 
 // ── Data fetchers ──
-async function fetchActivityData(hours){
-  const now=new Date(),start=new Date(now.getTime()-hours*3600000),articles={};
-  let cont=null,pg=0;const mx=10;
-  do{const p={action:"query",list:"recentchanges",rcnamespace:"0",rclimit:"500",rctype:"edit",
-    rcstart:now.toISOString(),rcend:start.toISOString(),rcdir:"older",rcprop:"title|tags|comment|sizes"};
-    if(cont)p.rccontinue=cont;const d=await mwFetch(p);
-    (d.query?.recentchanges||[]).forEach(rc=>{
-      if(!filterA(rc.title))return;
-      if(!articles[rc.title])articles[rc.title]={edits:0,reverts:0,bytesChanged:0,netBytes:0};
-      articles[rc.title].edits++;
-      const diff=(rc.newlen||0)-(rc.oldlen||0);
-      articles[rc.title].bytesChanged+=Math.abs(diff);
-      articles[rc.title].netBytes+=diff;
-      const tags=(rc.tags||[]).join(" ").toLowerCase();const comment=(rc.comment||"").toLowerCase();
-      if(tags.includes("revert")||tags.includes("rollback")||tags.includes("undo")||comment.includes("revert")||comment.includes("undid")||comment.includes("rv ")||comment.includes("rollback"))
-        articles[rc.title].reverts++;
-    });cont=d.continue?.rccontinue||null;pg++;
-  }while(cont&&pg<mx);
-  return Object.entries(articles).map(([title,d])=>({title,edits:d.edits,reverts:d.reverts,
-    bytesKB:Math.round(d.bytesChanged/1024),totalBytes:d.bytesChanged,netBytes:d.netBytes}));
-}
 
 async function fetchRecentNewArticles(hours){
   const now=new Date(),start=new Date(now.getTime()-hours*3600000);
@@ -231,7 +210,6 @@ function App(){
   const [newArticles,setNewArticles]=useState([]);
   const [deletedArticles,setDeletedArticles]=useState([]);
   const [moves,setMoves]=useState([]);
-  const [activityData,setActivityData]=useState([]);
   const [mostViewed,setMostViewed]=useState([]);
   const [connected,setConnected]=useState(false);
   const [totalEdits,setTotalEdits]=useState(0);
@@ -258,118 +236,84 @@ function App(){
   const uniqueArtsRef=useRef(new Set());const uniqueEditorsRef=useRef(new Set());
   const churnByArticleRef=useRef({});
   const [editsProgress,setEditsProgress]=useState(null);
-  const progressAbortRef=useRef(null);
-  const activityCacheRef=useRef({}); // {window: {data:[], timestamp, complete}}
-  const progressStateRef=useRef({}); // {window: {articles, cont, pg, now, start, maxPages, delay}}
+  const rawEditsRef=useRef([]); // stores every edit with timestamp: [{title,ts,bytes,absBytes,isRevert}]
+  const [rawEditsVersion,setRawEditsVersion]=useState(0); // triggers re-render when raw data changes
 
   const timeOpts=[{value:"10m",label:"10M"},{value:"1h",label:"1H"},{value:"6h",label:"6H"},{value:"24h",label:"24H"}];
   const viewOpts=[{value:"yesterday",label:"YDAY"},{value:"week",label:"WEEK"},{value:"month",label:"MONTH"},{value:"year",label:"YEAR"}];
   const p2TimeOpts=[{value:"1h",label:"1H"},{value:"6h",label:"6H"},{value:"12h",label:"12H"},{value:"24h",label:"24H"}];
 
-  // ── Loaders ──
-  const loadActivity=useCallback(()=>{
-    // Pause any in-progress load
-    if(progressAbortRef.current)progressAbortRef.current.abort=true;
+  // ── Shared 24H progressive loader — runs once, all windows filter from this ──
+  const loaderRef=useRef(null); // {active, cont, pg, now, start}
 
-    // Check completed cache first
-    const cached=activityCacheRef.current[editWindow];
-    if(cached&&cached.complete&&(Date.now()-cached.timestamp)<600000){
-      setActivityData(cached.data);setEditsLoading(false);setEditsProgress(null);
-      return;
-    }
+  const startLoader=useCallback(()=>{
+    // If already running, skip
+    if(loaderRef.current?.active)return;
 
-    const delay=editWindow==="10m"?500:1500;
-
-    // Check for saved progressive state to resume
-    const saved=progressStateRef.current[editWindow];
-    let articles,cont,pg,now,start;
-
-    if(saved&&(Date.now()-saved.startedAt)<600000){
-      articles=saved.articles;cont=saved.cont;pg=saved.pg;now=saved.now;start=saved.start;
-      const toArr=()=>Object.entries(articles).map(([title,d])=>({title,edits:d.edits,reverts:d.reverts,
-        bytesKB:Math.round(d.bytesChanged/1024),totalBytes:d.bytesChanged,netBytes:d.netBytes}));
-      setActivityData(toArr());
-      setEditsLoading(false);
-      setEditsProgress({loaded:pg*500,pages:pg});
-      if(!cont){
-        // Already finished last time
-        setEditsProgress(null);
-        activityCacheRef.current[editWindow]={data:toArr(),timestamp:Date.now(),complete:true};
-        return;
-      }
-    }else{
-      articles={};cont=null;pg=0;
-      now=new Date();start=new Date(now.getTime()-hoursFor(editWindow)*3600000);
-      setEditsLoading(true);setEditsProgress({loaded:0,pages:0});
-    }
-
-    const ctrl={abort:false};progressAbortRef.current=ctrl;
-    const windowKey=editWindow;
-
-    const processPage=(rcs)=>{
-      (rcs||[]).forEach(rc=>{
-        if(!filterA(rc.title))return;
-        if(!articles[rc.title])articles[rc.title]={edits:0,reverts:0,bytesChanged:0,netBytes:0};
-        articles[rc.title].edits++;
-        const diff=(rc.newlen||0)-(rc.oldlen||0);
-        articles[rc.title].bytesChanged+=Math.abs(diff);
-        articles[rc.title].netBytes+=diff;
-        const tags=(rc.tags||[]).join(" ").toLowerCase();const comment=(rc.comment||"").toLowerCase();
-        if(tags.includes("revert")||tags.includes("rollback")||tags.includes("undo")||comment.includes("revert")||comment.includes("undid")||comment.includes("rv ")||comment.includes("rollback"))
-          articles[rc.title].reverts++;
-      });
-    };
-
-    const toArray=()=>Object.entries(articles).map(([title,d])=>({title,edits:d.edits,reverts:d.reverts,
-      bytesKB:Math.round(d.bytesChanged/1024),totalBytes:d.bytesChanged,netBytes:d.netBytes}));
+    const now=new Date(),start=new Date(now.getTime()-24*3600000);
+    const state={active:true,cont:null,pg:0,now,start};
+    loaderRef.current=state;
+    setEditsLoading(true);setEditsProgress({loaded:0,pages:0});
 
     let retries=0;
     const fetchNext=async()=>{
-      if(ctrl.abort){
-        progressStateRef.current[windowKey]={articles,cont,pg,now,start,startedAt:progressStateRef.current[windowKey]?.startedAt||Date.now()};
-        return;
-      }
+      if(!state.active)return;
       const p={action:"query",list:"recentchanges",rcnamespace:"0",rclimit:"500",rctype:"edit",
-        rcstart:now.toISOString(),rcend:start.toISOString(),rcdir:"older",rcprop:"title|tags|comment|sizes"};
-      if(cont)p.rccontinue=cont;
+        rcstart:state.now.toISOString(),rcend:state.start.toISOString(),rcdir:"older",rcprop:"title|tags|comment|sizes|timestamp"};
+      if(state.cont)p.rccontinue=state.cont;
       try{
         const d=await mwFetch(p);
         retries=0;
-        processPage(d.query?.recentchanges);
-        cont=d.continue?.rccontinue||null;pg++;
-        const arr=toArray();
-        setEditsProgress({loaded:pg*500,pages:pg});
-        setActivityData(arr);
-        progressStateRef.current[windowKey]={articles,cont,pg,now,start,startedAt:progressStateRef.current[windowKey]?.startedAt||Date.now()};
-        if(pg===1)setEditsLoading(false);
-        if(cont&&!ctrl.abort){
-          setTimeout(fetchNext,delay);
+        const rcs=d.query?.recentchanges||[];
+        rcs.forEach(rc=>{
+          if(!filterA(rc.title))return;
+          const diff=(rc.newlen||0)-(rc.oldlen||0);
+          const tags=(rc.tags||[]).join(" ").toLowerCase();const comment=(rc.comment||"").toLowerCase();
+          const isRevert=tags.includes("revert")||tags.includes("rollback")||tags.includes("undo")||
+            comment.includes("revert")||comment.includes("undid")||comment.includes("rv ")||comment.includes("rollback");
+          rawEditsRef.current.push({title:rc.title,ts:new Date(rc.timestamp).getTime(),bytes:diff,absBytes:Math.abs(diff),isRevert});
+        });
+        state.cont=d.continue?.rccontinue||null;state.pg++;
+        setEditsProgress({loaded:state.pg*500,pages:state.pg});
+        setRawEditsVersion(v=>v+1);
+        if(state.pg===1)setEditsLoading(false);
+        if(state.cont&&state.active){
+          setTimeout(fetchNext,1500);
         }else{
-          // Done — no more data or aborted
+          state.active=false;
           setEditsProgress(null);
-          activityCacheRef.current[windowKey]={data:arr,timestamp:Date.now(),complete:true};
-          delete progressStateRef.current[windowKey];
         }
       }catch(e){
         retries++;
-        if(retries<5&&!ctrl.abort){
-          console.warn(`API error (retry ${retries}/5), waiting ${retries*3}s...`,e);
-          setTimeout(fetchNext,retries*3000); // back off: 3s, 6s, 9s, 12s, 15s
+        if(retries<5&&state.active){
+          console.warn(`API error (retry ${retries}/5), waiting ${retries*3}s...`);
+          setTimeout(fetchNext,retries*3000);
         }else{
-          // Save state so we can resume later
-          progressStateRef.current[windowKey]={articles,cont,pg,now,start,startedAt:progressStateRef.current[windowKey]?.startedAt||Date.now()};
-          setEditsProgress(null);
+          state.active=false;setEditsProgress(null);
         }
       }
     };
+    fetchNext();
+  },[]);
 
-    if(saved&&(Date.now()-saved.startedAt)<600000){
-      setTimeout(fetchNext,delay);
-    }else{
-      progressStateRef.current[windowKey]={articles,cont,pg,now,start,startedAt:Date.now()};
-      fetchNext();
-    }
-  },[editWindow]);
+  // Aggregate raw edits by time window — runs whenever window/mode/data changes
+  const sortedActivity=useMemo(()=>{
+    const cutoff=Date.now()-hoursFor(editWindow)*3600000;
+    const articles={};
+    rawEditsRef.current.forEach(e=>{
+      if(e.ts<cutoff)return;
+      if(!articles[e.title])articles[e.title]={edits:0,reverts:0,bytesChanged:0,netBytes:0};
+      articles[e.title].edits++;
+      articles[e.title].bytesChanged+=e.absBytes;
+      articles[e.title].netBytes+=e.bytes;
+      if(e.isRevert)articles[e.title].reverts++;
+    });
+    const data=Object.entries(articles).map(([title,d])=>({title,edits:d.edits,reverts:d.reverts,
+      bytesKB:Math.round(d.bytesChanged/1024),totalBytes:d.bytesChanged,netBytes:d.netBytes}));
+    if(editMode==="edits")return data.sort((a,b)=>b.edits-a.edits).slice(0,50);
+    if(editMode==="kb")return data.sort((a,b)=>b.totalBytes-a.totalBytes).slice(0,50);
+    return data.filter(a=>a.reverts>0).sort((a,b)=>b.reverts-a.reverts||b.edits-a.edits).slice(0,50);
+  },[rawEditsVersion,editWindow,editMode]);
 
   const loadP2=useCallback(()=>{
     setP2Loading(true);
@@ -380,12 +324,11 @@ function App(){
   },[p2Mode,p2Window]);
 
   // ── Countdowns ──
-  const editCountdown=useCountdown(REFRESH,loadActivity);
   const p2Countdown=useCountdown(REFRESH,()=>{if(p2Mode==="deleted")loadP2();});
 
   // ── Effects ──
   useEffect(()=>{const iv=setInterval(()=>setTick(t=>t+1),30000);return()=>clearInterval(iv);},[]);
-  useEffect(()=>{loadActivity();},[editWindow]);
+  useEffect(()=>{startLoader();},[]);  // Start shared loader on mount
   useEffect(()=>{setViewsLoading(true);fetchMostViewed(viewWindow).then(d=>{setMostViewed(d);setViewsLoading(false);});},[viewWindow]);
   useEffect(()=>{loadP2();},[p2Mode,p2Window]);
 
@@ -523,13 +466,6 @@ table{border-collapse:collapse;width:100%;margin-bottom:8px}td{padding:3px 0;ver
     a.click();URL.revokeObjectURL(u);setShowExportMenu(false);
   };
 
-  const sortedActivity=useMemo(()=>{
-    const data=[...activityData];
-    if(editMode==="edits")return data.sort((a,b)=>b.edits-a.edits).slice(0,50);
-    if(editMode==="kb")return data.sort((a,b)=>b.totalBytes-a.totalBytes).slice(0,50);
-    return data.filter(a=>a.reverts>0).sort((a,b)=>b.reverts-a.reverts||b.edits-a.edits).slice(0,50);
-  },[activityData,editMode]);
-
   const filteredFeed=showBots?feed:feed.filter(e=>!e.bot);
   const mostChurned=useMemo(()=>{
     const entries=Object.entries(churnByArticleRef.current);
@@ -630,7 +566,7 @@ table{border-collapse:collapse;width:100%;margin-bottom:8px}td{padding:3px 0;ver
                 <div style={{height:"100%",width:"100%",background:`linear-gradient(90deg,${C.accent}44,${C.accent},${C.accent}44)`,backgroundSize:"200% 100%",animation:"pulse 1.5s ease infinite",borderRadius:1}}/>
               </div>
             </div>
-          :<CountdownBar remaining={editCountdown} total={REFRESH} color={editMode==="edits"?C.amber:editMode==="kb"?C.green:C.red}/>}
+          :null}
           <div style={{flex:1,overflow:"auto"}}>{editsLoading?<SkeletonList/>:sortedActivity.length===0?
             <div style={{padding:30,textAlign:"center",color:C.textDim,fontFamily:"'IBM Plex Mono',monospace",fontSize:10}}>No data</div>
             :sortedActivity.map((item,i)=>{
