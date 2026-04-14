@@ -602,7 +602,18 @@ table{border-collapse:collapse;width:100%;margin-bottom:8px}td{padding:3px 0;ver
           <div style={{padding:"6px 12px",borderBottom:`1px solid ${C.border}`,background:C.panel,display:"flex",alignItems:"center",gap:5}}>
             <span style={{fontSize:11}}>▲</span>
             <div title="Most viewed Wikipedia articles — ranked by page views from the Wikimedia API" style={{fontFamily:"'Rajdhani',sans-serif",fontWeight:700,fontSize:11,color:C.accent,textTransform:"uppercase",letterSpacing:2,cursor:"help"}}>Viewed</div>
-            <div style={{marginLeft:"auto"}}><TimeSelector options={viewOpts} value={viewWindow} onChange={setViewWindow}/></div>
+            <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6}}>
+              {viewWindow==="yesterday"&&(()=>{
+                void tick; // force recalculate every 30s
+                const now=new Date();
+                const utcMidnight=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate()+1));
+                const diff=utcMidnight-now;
+                const h=Math.floor(diff/3600000);
+                const m=Math.floor((diff%3600000)/60000);
+                return <span title={`Data resets at midnight UTC when 'yesterday' becomes a new day.\nCurrent UTC: ${now.toUTCString().slice(17,22)}\nWill auto-refresh when the day rolls over.`} style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:8,color:C.textDim,cursor:"help"}}>resets in {h}h {m}m</span>;
+              })()}
+              <TimeSelector options={viewOpts} value={viewWindow} onChange={setViewWindow}/>
+            </div>
           </div>
           <div style={{flex:1,overflow:"auto"}}>{viewsLoading?<SkeletonList/>:mostViewed.length===0?
             <div style={{padding:30,textAlign:"center",color:C.textDim,fontFamily:"'IBM Plex Mono',monospace",fontSize:10}}>No data</div>
