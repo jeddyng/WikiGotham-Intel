@@ -36,7 +36,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#05060a;}
 const {useState,useEffect,useCallback,useRef,useMemo}=React;
 const API_MW="https://en.wikipedia.org/w/api.php";
 const STREAM_URL="https://stream.wikimedia.org/v2/stream/recentchange";
-const REFRESH=300;
+const REFRESH=600;
 const C={bg:"#05060a",panel:"#0a0c12",card:"#0f1219",cardHover:"#151a24",border:"#181d2a",accent:"#00c8ff",accentDim:"rgba(0,200,255,0.08)",amber:"#ffa800",amberDim:"rgba(255,168,0,0.1)",red:"#ff3858",redDim:"rgba(255,56,88,0.08)",green:"#00e68a",greenDim:"rgba(0,230,138,0.08)",text:"#b0b6c4",textDim:"#4e5568",textBright:"#e2e6ee"};
 
 async function mwFetch(p){const u=new URL(API_MW);Object.entries({...p,format:"json",origin:"*"}).forEach(([k,v])=>u.searchParams.set(k,v));return(await fetch(u)).json();}
@@ -270,69 +270,64 @@ function App(){
     // Abort any in-progress progressive load
     if(progressAbortRef.current)progressAbortRef.current.abort=true;
 
-    // Check cache — use if less than 3 minutes old
+    // Check cache — use if less than 5 minutes old
     const cached=activityCacheRef.current[editWindow];
-    if(cached&&(Date.now()-cached.timestamp)<300000){
+    if(cached&&(Date.now()-cached.timestamp)<600000){
       setActivityData(cached.data);setEditsLoading(false);
-      setEditsProgress(cached.complete?null:{loaded:cached.data.length*10,pages:0,done:true});
+      setEditsProgress(cached.complete?null:{loaded:cached.data.length*10,pages:0});
       return;
     }
 
-    if(editWindow==="24h"){
-      // Progressive load for 24H — one page every 2 seconds
-      setEditsLoading(true);setEditsProgress({loaded:0,pages:0});
-      const ctrl={abort:false};progressAbortRef.current=ctrl;
-      const now=new Date(),start=new Date(now.getTime()-24*3600000);
-      const articles={};let cont=null;let pg=0;const maxPages=40;
+    // Max pages per window — enough to cover most edits in that period
+    const maxPages=editWindow==="10m"?6:editWindow==="1h"?30:editWindow==="6h"?40:40;
+    const delay=editWindow==="10m"?500:1500; // faster for short windows
 
-      const processPage=(rcs)=>{
-        (rcs||[]).forEach(rc=>{
-          if(!filterA(rc.title))return;
-          if(!articles[rc.title])articles[rc.title]={edits:0,reverts:0,bytesChanged:0,netBytes:0};
-          articles[rc.title].edits++;
-          const diff=(rc.newlen||0)-(rc.oldlen||0);
-          articles[rc.title].bytesChanged+=Math.abs(diff);
-          articles[rc.title].netBytes+=diff;
-          const tags=(rc.tags||[]).join(" ").toLowerCase();const comment=(rc.comment||"").toLowerCase();
-          if(tags.includes("revert")||tags.includes("rollback")||tags.includes("undo")||comment.includes("revert")||comment.includes("undid")||comment.includes("rv ")||comment.includes("rollback"))
-            articles[rc.title].reverts++;
-        });
-      };
+    setEditsLoading(true);setEditsProgress({loaded:0,pages:0});
+    const ctrl={abort:false};progressAbortRef.current=ctrl;
+    const hours=hoursFor(editWindow);
+    const now=new Date(),start=new Date(now.getTime()-hours*3600000);
+    const articles={};let cont=null;let pg=0;
 
-      const toArray=()=>Object.entries(articles).map(([title,d])=>({title,edits:d.edits,reverts:d.reverts,
-        bytesKB:Math.round(d.bytesChanged/1024),totalBytes:d.bytesChanged,netBytes:d.netBytes}));
-
-      const fetchNext=async()=>{
-        if(ctrl.abort)return;
-        const p={action:"query",list:"recentchanges",rcnamespace:"0",rclimit:"500",rctype:"edit",
-          rcstart:now.toISOString(),rcend:start.toISOString(),rcdir:"older",rcprop:"title|tags|comment|sizes"};
-        if(cont)p.rccontinue=cont;
-        try{
-          const d=await mwFetch(p);
-          processPage(d.query?.recentchanges);
-          cont=d.continue?.rccontinue||null;pg++;
-          const arr=toArray();
-          setEditsProgress({loaded:pg*500,pages:pg});
-          setActivityData(arr);
-          activityCacheRef.current["24h"]={data:arr,timestamp:Date.now(),complete:false};
-          if(pg===1)setEditsLoading(false);
-          if(cont&&pg<maxPages&&!ctrl.abort){
-            setTimeout(fetchNext,2000);
-          }else{
-            setEditsProgress(null);
-            activityCacheRef.current["24h"]={data:arr,timestamp:Date.now(),complete:true};
-          }
-        }catch(e){setEditsProgress(null);}
-      };
-      fetchNext();
-    }else{
-      // Normal fast load for 10M/1H/6H
-      setEditsLoading(true);setEditsProgress(null);
-      fetchActivityData(hoursFor(editWindow)).then(d=>{
-        setActivityData(d);setEditsLoading(false);
-        activityCacheRef.current[editWindow]={data:d,timestamp:Date.now(),complete:true};
+    const processPage=(rcs)=>{
+      (rcs||[]).forEach(rc=>{
+        if(!filterA(rc.title))return;
+        if(!articles[rc.title])articles[rc.title]={edits:0,reverts:0,bytesChanged:0,netBytes:0};
+        articles[rc.title].edits++;
+        const diff=(rc.newlen||0)-(rc.oldlen||0);
+        articles[rc.title].bytesChanged+=Math.abs(diff);
+        articles[rc.title].netBytes+=diff;
+        const tags=(rc.tags||[]).join(" ").toLowerCase();const comment=(rc.comment||"").toLowerCase();
+        if(tags.includes("revert")||tags.includes("rollback")||tags.includes("undo")||comment.includes("revert")||comment.includes("undid")||comment.includes("rv ")||comment.includes("rollback"))
+          articles[rc.title].reverts++;
       });
-    }
+    };
+
+    const toArray=()=>Object.entries(articles).map(([title,d])=>({title,edits:d.edits,reverts:d.reverts,
+      bytesKB:Math.round(d.bytesChanged/1024),totalBytes:d.bytesChanged,netBytes:d.netBytes}));
+
+    const fetchNext=async()=>{
+      if(ctrl.abort)return;
+      const p={action:"query",list:"recentchanges",rcnamespace:"0",rclimit:"500",rctype:"edit",
+        rcstart:now.toISOString(),rcend:start.toISOString(),rcdir:"older",rcprop:"title|tags|comment|sizes"};
+      if(cont)p.rccontinue=cont;
+      try{
+        const d=await mwFetch(p);
+        processPage(d.query?.recentchanges);
+        cont=d.continue?.rccontinue||null;pg++;
+        const arr=toArray();
+        setEditsProgress({loaded:pg*500,pages:pg});
+        setActivityData(arr);
+        activityCacheRef.current[editWindow]={data:arr,timestamp:Date.now(),complete:false};
+        if(pg===1)setEditsLoading(false);
+        if(cont&&pg<maxPages&&!ctrl.abort){
+          setTimeout(fetchNext,delay);
+        }else{
+          setEditsProgress(null);
+          activityCacheRef.current[editWindow]={data:arr,timestamp:Date.now(),complete:true};
+        }
+      }catch(e){setEditsProgress(null);}
+    };
+    fetchNext();
   },[editWindow]);
 
   const loadP2=useCallback(()=>{
