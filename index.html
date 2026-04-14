@@ -36,7 +36,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#05060a;}
 const {useState,useEffect,useCallback,useRef,useMemo}=React;
 const API_MW="https://en.wikipedia.org/w/api.php";
 const STREAM_URL="https://stream.wikimedia.org/v2/stream/recentchange";
-const REFRESH=180;
+const REFRESH=300;
 const C={bg:"#05060a",panel:"#0a0c12",card:"#0f1219",cardHover:"#151a24",border:"#181d2a",accent:"#00c8ff",accentDim:"rgba(0,200,255,0.08)",amber:"#ffa800",amberDim:"rgba(255,168,0,0.1)",red:"#ff3858",redDim:"rgba(255,56,88,0.08)",green:"#00e68a",greenDim:"rgba(0,230,138,0.08)",text:"#b0b6c4",textDim:"#4e5568",textBright:"#e2e6ee"};
 
 async function mwFetch(p){const u=new URL(API_MW);Object.entries({...p,format:"json",origin:"*"}).forEach(([k,v])=>u.searchParams.set(k,v));return(await fetch(u)).json();}
@@ -259,6 +259,7 @@ function App(){
   const churnByArticleRef=useRef({});
   const [editsProgress,setEditsProgress]=useState(null); // {loaded:N, pages:N} or null
   const progressAbortRef=useRef(null);
+  const activityCacheRef=useRef({}); // {window: {data:[], timestamp:Date.now(), complete:bool}}
 
   const timeOpts=[{value:"10m",label:"10M"},{value:"1h",label:"1H"},{value:"6h",label:"6H"},{value:"24h",label:"24H"}];
   const viewOpts=[{value:"yesterday",label:"YDAY"},{value:"week",label:"WEEK"},{value:"month",label:"MONTH"},{value:"year",label:"YEAR"}];
@@ -268,6 +269,14 @@ function App(){
   const loadActivity=useCallback(()=>{
     // Abort any in-progress progressive load
     if(progressAbortRef.current)progressAbortRef.current.abort=true;
+
+    // Check cache — use if less than 3 minutes old
+    const cached=activityCacheRef.current[editWindow];
+    if(cached&&(Date.now()-cached.timestamp)<300000){
+      setActivityData(cached.data);setEditsLoading(false);
+      setEditsProgress(cached.complete?null:{loaded:cached.data.length*10,pages:0,done:true});
+      return;
+    }
 
     if(editWindow==="24h"){
       // Progressive load for 24H — one page every 2 seconds
@@ -302,13 +311,16 @@ function App(){
           const d=await mwFetch(p);
           processPage(d.query?.recentchanges);
           cont=d.continue?.rccontinue||null;pg++;
+          const arr=toArray();
           setEditsProgress({loaded:pg*500,pages:pg});
-          setActivityData(toArray());
-          if(pg===1)setEditsLoading(false); // show partial results after first page
+          setActivityData(arr);
+          activityCacheRef.current["24h"]={data:arr,timestamp:Date.now(),complete:false};
+          if(pg===1)setEditsLoading(false);
           if(cont&&pg<maxPages&&!ctrl.abort){
             setTimeout(fetchNext,2000);
           }else{
             setEditsProgress(null);
+            activityCacheRef.current["24h"]={data:arr,timestamp:Date.now(),complete:true};
           }
         }catch(e){setEditsProgress(null);}
       };
@@ -316,7 +328,10 @@ function App(){
     }else{
       // Normal fast load for 10M/1H/6H
       setEditsLoading(true);setEditsProgress(null);
-      fetchActivityData(hoursFor(editWindow)).then(d=>{setActivityData(d);setEditsLoading(false);});
+      fetchActivityData(hoursFor(editWindow)).then(d=>{
+        setActivityData(d);setEditsLoading(false);
+        activityCacheRef.current[editWindow]={data:d,timestamp:Date.now(),complete:true};
+      });
     }
   },[editWindow]);
 
