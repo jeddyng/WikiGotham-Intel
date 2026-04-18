@@ -76,20 +76,46 @@ async function fetchMoves(){
   return(d.query?.logevents||[]).map(le=>({id:"move_"+le.logid,from:le.title||"",to:le.params?.target_title||"",user:le.user||"",comment:le.comment||"",timestamp:new Date(le.timestamp).getTime()}));
 }
 
-async function fetchDayTop(date){const y=date.getFullYear(),m=pad2(date.getMonth()+1),d=pad2(date.getDate());
-  try{const r=await fetch(`https://wikimedia.org/api/rest_v1/metrics/pageviews/top/en.wikipedia/all-access/${y}/${m}/${d}`);const data=await r.json();return(data.items?.[0]?.articles||[]).filter(a=>filterA(a.article));}catch(e){return[];}}
-async function fetchViewedYesterday(){const d=new Date();d.setDate(d.getDate()-1);return(await fetchDayTop(d)).slice(0,50).map(a=>({title:a.article.replace(/_/g," "),views:a.views}));}
-async function fetchViewedWeek(){const days=[];for(let i=1;i<=7;i++){const d=new Date();d.setDate(d.getDate()-i);days.push(d);}
+// FIXED: use UTC getters to match Wikimedia API's UTC day boundaries
+async function fetchDayTop(date){
+  const y=date.getUTCFullYear(),m=pad2(date.getUTCMonth()+1),d=pad2(date.getUTCDate());
+  try{const r=await fetch(`https://wikimedia.org/api/rest_v1/metrics/pageviews/top/en.wikipedia/all-access/${y}/${m}/${d}`);const data=await r.json();return(data.items?.[0]?.articles||[]).filter(a=>filterA(a.article));}catch(e){return[];}
+}
+
+// FIXED: UTC date math + fallback to day-before-yesterday if Wikimedia hasn't processed yesterday yet
+async function fetchViewedYesterday(){
+  const d1=new Date();d1.setUTCDate(d1.getUTCDate()-1);
+  let top=await fetchDayTop(d1);
+  if(!top.length){
+    const d2=new Date();d2.setUTCDate(d2.getUTCDate()-2);
+    top=await fetchDayTop(d2);
+  }
+  return top.slice(0,50).map(a=>({title:a.article.replace(/_/g," "),views:a.views}));
+}
+
+// FIXED: UTC date math for week aggregation
+async function fetchViewedWeek(){
+  const days=[];for(let i=1;i<=7;i++){const d=new Date();d.setUTCDate(d.getUTCDate()-i);days.push(d);}
   const r=await Promise.all(days.map(fetchDayTop));const m={};r.flat().forEach(a=>{const t=a.article.replace(/_/g," ");m[t]=(m[t]||0)+a.views;});
-  return Object.entries(m).sort((a,b)=>b[1]-a[1]).slice(0,50).map(([title,views])=>({title,views}));}
-async function fetchViewedMonth(){const now=new Date();let y=now.getFullYear(),mo=now.getMonth();if(mo===0){mo=12;y--;}
+  return Object.entries(m).sort((a,b)=>b[1]-a[1]).slice(0,50).map(([title,views])=>({title,views}));
+}
+
+// FIXED: use UTC getters for month logic
+async function fetchViewedMonth(){
+  const now=new Date();let y=now.getUTCFullYear(),mo=now.getUTCMonth();if(mo===0){mo=12;y--;}
   try{const r=await fetch(`https://wikimedia.org/api/rest_v1/metrics/pageviews/top/en.wikipedia/all-access/${y}/${pad2(mo)}/all-days`);const data=await r.json();
-    return(data.items?.[0]?.articles||[]).filter(a=>filterA(a.article)).slice(0,50).map(a=>({title:a.article.replace(/_/g," "),views:a.views}));}catch(e){return[];}}
-async function fetchViewedYear(){const now=new Date();const fetches=[];
-  for(let i=0;i<3;i++){let y=now.getFullYear(),mo=now.getMonth()-i;if(mo<=0){mo+=12;y--;}
+    return(data.items?.[0]?.articles||[]).filter(a=>filterA(a.article)).slice(0,50).map(a=>({title:a.article.replace(/_/g," "),views:a.views}));}catch(e){return[];}
+}
+
+// FIXED: UTC getters for year aggregation
+async function fetchViewedYear(){
+  const now=new Date();const fetches=[];
+  for(let i=0;i<3;i++){let y=now.getUTCFullYear(),mo=now.getUTCMonth()-i;if(mo<=0){mo+=12;y--;}
     fetches.push(fetch(`https://wikimedia.org/api/rest_v1/metrics/pageviews/top/en.wikipedia/all-access/${y}/${pad2(mo)}/all-days`).then(r=>r.json()).then(d=>(d.items?.[0]?.articles||[]).filter(a=>filterA(a.article))).catch(()=>[]));
   }const results=await Promise.all(fetches);const m={};results.flat().forEach(a=>{const t=a.article.replace(/_/g," ");m[t]=(m[t]||0)+a.views;});
-  return Object.entries(m).sort((a,b)=>b[1]-a[1]).slice(0,50).map(([title,views])=>({title,views}));}
+  return Object.entries(m).sort((a,b)=>b[1]-a[1]).slice(0,50).map(([title,views])=>({title,views}));
+}
+
 async function fetchMostViewed(range){if(range==="yesterday")return fetchViewedYesterday();if(range==="week")return fetchViewedWeek();if(range==="month")return fetchViewedMonth();return fetchViewedYear();}
 
 // ── Countdown hook ──
@@ -632,7 +658,9 @@ table{border-collapse:collapse;width:100%;margin-bottom:8px}td{padding:3px 0;ver
             </div>
           </div>
           <div style={{flex:1,overflow:"auto"}}>{viewsLoading?<SkeletonList/>:mostViewed.length===0?
-            <div style={{padding:30,textAlign:"center",color:C.textDim,fontFamily:"'IBM Plex Mono',monospace",fontSize:10}}>No data</div>
+            <div style={{padding:30,textAlign:"center",color:C.textDim,fontFamily:"'IBM Plex Mono',monospace",fontSize:10}}>
+              {viewWindow==="yesterday"?"Wikimedia hasn't processed recent data yet — try WEEK or refresh in a few hours":"No data"}
+            </div>
             :mostViewed.map((item,i)=>(<RankedItem key={item.title} rank={i+1} title={item.title} value={item.views} label="views" color={C.accent}/>))}</div>
         </div>}
       </div>
@@ -664,7 +692,7 @@ table{border-collapse:collapse;width:100%;margin-bottom:8px}td{padding:3px 0;ver
                 onMouseLeave={e=>{e.currentTarget.style.background="transparent";e.currentTarget.style.color=C.text;}}>🌐 HTML — styled report</button>
             </div>}
           </div>
-          <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9,color:C.textDim}}><span style={{color:connected?C.green:C.red}}>●</span> v9</span>
+          <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:9,color:C.textDim}}><span style={{color:connected?C.green:C.red}}>●</span> v10</span>
         </span>
       </div>
     </div>
